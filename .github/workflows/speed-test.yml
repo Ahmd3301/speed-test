@@ -163,42 +163,57 @@ jobs:
           python3 - <<'PY'
           import subprocess, time
 
-          def curl_dl(url, name, timeout=180):
+          def curl_probe(url, name, referer=None, timeout=180):
               try:
-                  r = subprocess.run(
-                      ["curl", "-sL", "-A", "Mozilla/5.0 (compatible; GitHub-Actions-Speedtest)",
-                       "-o", "/dev/null", "-w", "%{speed_download}|%{time_starttransfer}|%{size_download}|%{http_code}",
-                       "--max-time", str(timeout), url],
-                      capture_output=True, text=True, timeout=timeout + 15)
-                  spd, ttf, size, code = r.stdout.strip().split("|")
+                  cmd = ["curl", "-sL", "-A", "Mozilla/5.0 (compatible; GitHub-Actions-Speedtest)",
+                         "-o", "/dev/null", "-w", "%{speed_download}|%{time_starttransfer}|%{size_download}|%{http_code}|%{time_total}",
+                         "--max-time", str(timeout)]
+                  if referer:
+                      cmd += ["-e", referer]
+                  cmd.append(url)
+                  r = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout + 15)
+                  spd, ttf, size, code, total = r.stdout.strip().split("|")
                   rate_mb = float(spd) / 1024 / 1024
                   size_mb = float(size) / 1024 / 1024
-                  note = ""
-                  if code != "200":
-                      note = " [HTTP {}]".format(code)
-                  print(f"RESULT_NET_{name}={rate_mb:.1f} MB/s (file={size_mb:.1f} MB, TTFB={float(ttf):.2f}s){note}")
+                  print(f"RESULT_NET_{name}={rate_mb:.1f} MB/s (file={size_mb:.1f} MB, TTFB={float(ttf):.3f}s, http={code})")
               except Exception as e:
                   print(f"RESULT_NET_{name}=FAILED ({e})")
 
-          curl_dl("https://speed.cloudflare.com/__down?bytes=100000000", "CLOUDFLARE_100MB")
-          curl_dl("https://speed.hetzner.com/100MB.bin", "HETZNER_100MB")
-          curl_dl("https://proof.ovh.net/files/100Mb.dat", "OVH_100Mb")
-          curl_dl("https://speedtest.tele2.net/100MB.zip", "TELE2_100MB")
-          curl_dl("https://codeload.github.com/github/gitignore/tar.gz/refs/heads/main", "GITHUB_CODELOAD")
+          # Cloudflare speed test endpoints
+          curl_probe("https://speed.cloudflare.com/__down?bytes=20000000", "CLOUDFLARE_20MB", referer="https://speed.cloudflare.com/")
+          curl_probe("https://speed.cloudflare.com/__down?bytes=50000000", "CLOUDFLARE_50MB", referer="https://speed.cloudflare.com/")
+          curl_probe("https://speed.cloudflare.com/__down?bytes=100000000", "CLOUDFLARE_100MB", referer="https://speed.cloudflare.com/")
+          # German infra / mirrors
+          curl_probe("https://ash-speed.hetzner.com/100MB.bin", "HETZNER_ASH_100MB")
+          curl_probe("https://fsn1-speed.hetzner.com/100MB.bin", "HETZNER_FSN1_100MB")
+          curl_probe("https://proof.ovh.net/files/100Mb.dat", "OVH_100Mb")
+          curl_probe("https://proof.ovh.net/files/10Mb.dat", "OVH_10Mb")
+          # GitHub itself
+          curl_probe("https://codeload.github.com/github/gitignore/tar.gz/refs/heads/main", "GITHUB_CODELOAD")
 
-          # Latency probes (parse real RTT from ping output)
+          # Latency: install ping if missing, else fall back to curl connect/TTFB metrics
+          ping_ok = subprocess.run(["bash", "-lc", "command -v ping"], capture_output=True, text=True).returncode == 0
+          if not ping_ok:
+              subprocess.run(["sudo", "apt-get", "update", "-qq"], capture_output=True)
+              subprocess.run(["sudo", "apt-get", "install", "-y", "-qq", "iputils-ping"], capture_output=True)
+              ping_ok = subprocess.run(["bash", "-lc", "command -v ping"], capture_output=True, text=True).returncode == 0
+
           for host, name in [("github.com", "GITHUB"), ("api.github.com", "API_GITHUB"),
-                             ("speed.cloudflare.com", "CLOUDFLARE"), ("www.google.com", "GOOGLE")]:
+                             ("speed.cloudflare.com", "CLOUDFLARE"), ("www.azure.com", "AZURE")]:
               try:
-                  r = subprocess.run(["ping", "-c", "4", "-i", "0.2", "-W", "1", host],
-                                     capture_output=True, text=True, timeout=15)
-                  out = r.stdout
-                  if "rtt min/avg/max/mdev" in out:
-                      summary = [l for l in out.splitlines() if "rtt min" in l][0].split("=")[1].strip()
-                      avg = summary.split("/")[1]
-                      print(f"RESULT_LATENCY_{name}={avg} ms avg RTT")
-                  else:
-                      print(f"RESULT_LATENCY_{name}=NA")
+                  if ping_ok:
+                      r = subprocess.run(["ping", "-c", "4", "-i", "0.2", "-W", "1", host],
+                                         capture_output=True, text=True, timeout=15)
+                      if "rtt min/avg/max/mdev" in r.stdout:
+                          summary = [l for l in r.stdout.splitlines() if "rtt min" in l][0].split("=")[1].strip()
+                          avg = summary.split("/")[1]
+                          print(f"RESULT_LATENCY_{name}={avg} ms avg RTT (ping)")
+                          continue
+                  # fallback: TLS connect time via curl
+                  r = subprocess.run(["curl", "-s", "-o", "/dev/null", "-w", "%{time_connect}|%{time_appconnect}|%{time_starttransfer}",
+                                      "--max-time", "15", "https://" + host + "/"], capture_output=True, text=True, timeout=30)
+                  conn, tls, ttfb = r.stdout.strip().split("|")
+                  print(f"RESULT_LATENCY_{name}=conn={float(conn)*1000:.1f}ms tls={float(tls)*1000:.1f}ms ttfb={float(ttfb)*1000:.1f}ms (curl)")
               except Exception as e:
                   print(f"RESULT_LATENCY_{name}=FAILED ({e})")
           PY
