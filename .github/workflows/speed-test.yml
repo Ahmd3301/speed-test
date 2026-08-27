@@ -161,37 +161,44 @@ jobs:
         run: |
           echo "::group::Network Benchmark"
           python3 - <<'PY'
-          import subprocess, time, json
+          import subprocess, time
 
-          def curl_dl(url, name, desc, expect_bytes=None, timeout=180):
+          def curl_dl(url, name, timeout=180):
               try:
-                  t0 = time.perf_counter()
                   r = subprocess.run(
-                      ["curl", "-sL", "-o", "/dev/null", "-w", "%{speed_download}|%{time_starttransfer}|%{size_download}|%{http_code}",
+                      ["curl", "-sL", "-A", "Mozilla/5.0 (compatible; GitHub-Actions-Speedtest)",
+                       "-o", "/dev/null", "-w", "%{speed_download}|%{time_starttransfer}|%{size_download}|%{http_code}",
                        "--max-time", str(timeout), url],
                       capture_output=True, text=True, timeout=timeout + 15)
-                  t1 = time.perf_counter()
                   spd, ttf, size, code = r.stdout.strip().split("|")
-                  elapsed = t1 - t0
                   rate_mb = float(spd) / 1024 / 1024
                   size_mb = float(size) / 1024 / 1024
-                  print(f"RESULT_NET_{name}={rate_mb:.2f} MB/s over {elapsed:.2f}s (file={size_mb:.1f} MB, TTFB={float(ttf):.3f}s, http={code})")
+                  note = ""
+                  if code != "200":
+                      note = " [HTTP {}]".format(code)
+                  print(f"RESULT_NET_{name}={rate_mb:.1f} MB/s (file={size_mb:.1f} MB, TTFB={float(ttf):.2f}s){note}")
               except Exception as e:
                   print(f"RESULT_NET_{name}=FAILED ({e})")
 
-          curl_dl("https://speed.cloudflare.com/__down?bytes=100000000", "CLOUDFLARE_100MB", "Cloudflare 100MB download")
-          curl_dl("https://speed.cloudflare.com/__down?bytes=20000000", "CLOUDFLARE_20MB", "Cloudflare 20MB download")
-          curl_dl("https://codeload.github.com/github/gitignore/tar.gz/refs/heads/main", "GITHUB_CODELOAD", "GitHub codeload tarball")
+          curl_dl("https://speed.cloudflare.com/__down?bytes=100000000", "CLOUDFLARE_100MB")
+          curl_dl("https://speed.hetzner.com/100MB.bin", "HETZNER_100MB")
+          curl_dl("https://proof.ovh.net/files/100Mb.dat", "OVH_100Mb")
+          curl_dl("https://speedtest.tele2.net/100MB.zip", "TELE2_100MB")
+          curl_dl("https://codeload.github.com/github/gitignore/tar.gz/refs/heads/main", "GITHUB_CODELOAD")
 
-          # Latency probes
+          # Latency probes (parse real RTT from ping output)
           for host, name in [("github.com", "GITHUB"), ("api.github.com", "API_GITHUB"),
-                             ("speed.cloudflare.com", "CLOUDFLARE"), ("ftp.hq.nasa.gov", "NASA")]:
+                             ("speed.cloudflare.com", "CLOUDFLARE"), ("www.google.com", "GOOGLE")]:
               try:
-                  t0 = time.perf_counter()
-                  subprocess.run(["ping", "-c", "4", "-i", "0.2", "-W", "2", host],
-                                 capture_output=True, text=True, timeout=15)
-                  rtt = (time.perf_counter() - t0) / 3 * 1000
-                  print(f"RESULT_LATENCY_{name}={rtt:.1f} ms avg RTT")
+                  r = subprocess.run(["ping", "-c", "4", "-i", "0.2", "-W", "1", host],
+                                     capture_output=True, text=True, timeout=15)
+                  out = r.stdout
+                  if "rtt min/avg/max/mdev" in out:
+                      summary = [l for l in out.splitlines() if "rtt min" in l][0].split("=")[1].strip()
+                      avg = summary.split("/")[1]
+                      print(f"RESULT_LATENCY_{name}={avg} ms avg RTT")
+                  else:
+                      print(f"RESULT_LATENCY_{name}=NA")
               except Exception as e:
                   print(f"RESULT_LATENCY_{name}=FAILED ({e})")
           PY
