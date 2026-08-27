@@ -219,6 +219,36 @@ jobs:
           PY
           echo "::endgroup::"
 
+      - name: Network upload benchmark
+        run: |
+          echo "::group::Network Upload Benchmark"
+          python3 - <<'PY'
+          import subprocess, time
+
+          def curl_up(name, mb, url="https://speed.cloudflare.com/__up", timeout=240):
+              size = mb * 1024 * 1024
+              try:
+                  cmd = [f"head -c {size} /dev/zero | curl -s -X POST -o /dev/null --data-binary @- "
+                         f"--max-time {timeout} "
+                         f"-w '%{{speed_upload}}|%{{size_upload}}|%{{http_code}}|%{{time_total}}' "
+                         f"{url}"]
+                  r = subprocess.run(["bash", "-lc", cmd[0]], capture_output=True, text=True, timeout=timeout + 15)
+                  if not r.stdout.strip():
+                      print(f"RESULT_UPLOAD_{name}=FAILED no output: {r.stderr.strip()[:200]}")
+                      return
+                  spd, size_u, code, total = r.stdout.strip().split("|")
+                  rate = float(spd) / 1024 / 1024
+                  sent = float(size_u) / 1024 / 1024
+                  print(f"RESULT_UPLOAD_{name}={rate:.1f} MB/s (sent={sent:.1f} MB, http={code})")
+              except Exception as e:
+                  print(f"RESULT_UPLOAD_{name}=FAILED ({e})")
+
+          curl_up("CLOUDFLARE_20MB", 20)
+          curl_up("CLOUDFLARE_50MB", 50)
+          curl_up("CLOUDFLARE_100MB", 100)
+          PY
+          echo "::endgroup::"
+
       - name: sysbench (best-effort)
         run: |
           echo "::group::sysbench (best-effort)"
