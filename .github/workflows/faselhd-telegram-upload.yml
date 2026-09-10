@@ -1,0 +1,217 @@
+name: FaselHD Telegram Upload (local Bot API)
+
+# نسخة من benchmark: تحميل 1080p بـ N_m3u8DL-RE ثم رفع MP4 إلى تليجرام عبر
+# Local Bot API Server (tdlib) — يدعم الرفع حتى 2000MB لكل ملف:
+# https://core.telegram.org/bots/api#using-a-local-bot-api-server
+# الصورة الجاهزة (بدون بناء): https://hub.docker.com/r/aiogram/telegram-bot-api
+# فكرة التقسيم مستوحاة من: https://github.com/myrosama/telegram-cloud-backup
+#
+# القواعد:
+# - الأسرار (api_id/api_hash/token/chat) من GitHub Secrets فقط — لا تظهر في أي لوج.
+# - إن تجاوز الملف 1.9GB يُقسَّم إلى PART 1..N (كل جزء ≤1.9GB) ويُرسَل كل جزء
+#   كملف مستقل مع caption، وإعادة التجميع بـ: cat *.part* > movie.mp4
+# - Rate Limit: عند 429 ينام retry_after ويعيد (حتى 5 مرات) + فاصل بين الأجزاء.
+# - سياسة عدم التخزين: الفيديو يُحذف من الـ Runner بعد الرفع (اللوجات فقط في الـ artifact).
+#
+# التشغيل عبر gh:
+#   gh workflow run "FaselHD Telegram Upload (local Bot API)" --ref main --repo Ahmd3301/speed-test \
+#     -f page_url="https://www.fasel-hd.co/?p=271259" -f threads="16"
+
+on:
+  workflow_dispatch:
+    inputs:
+      page_url:
+        description: 'Fasel-HD episode page URL'
+        required: false
+        default: 'https://www.fasel-hd.co/?p=228502'
+        type: string
+      threads:
+        description: 'N_m3u8DL-RE thread count'
+        required: false
+        default: '16'
+        type: string
+
+permissions:
+  contents: read
+  actions: read
+
+env:
+  UA: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36'
+  TG_IMAGE: 'aiogram/telegram-bot-api:latest'
+
+jobs:
+  download-and-upload:
+    name: DL+Upload (${{ inputs.page_url }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Runner hardware (brief)
+        run: |
+          echo "CPUS=$(nproc) | $(lscpu | awk -F': +' '/Model name/{print $2; exit}') | $(free -h | awk '/^Mem:/{print $2}')"
+
+      - name: Restore tools cache
+        id: tools-cache
+        uses: actions/cache@v4
+        with:
+          path: ~/tools
+          key: Linux-tools-nm3u8dlre-ffmpegstatic-v2
+          restore-keys: |
+            Linux-tools-
+
+      - name: Restore Bot API image cache
+        id: img-cache
+        uses: actions/cache@v4
+        with:
+          path: ~/docker-cache
+          key: Linux-docker-tgbotapi-v1
+          restore-keys: |
+            Linux-docker-tgbotapi-
+
+      - name: Setup tools + Bot API image (cached expected)
+        run: |
+          T0=$(date +%s.%N)
+          mkdir -p ~/tools ~/docker-cache
+          if [ -x "$HOME/tools/N_m3u8DL-RE" ]; then NM_SRC="cache-hit"; else
+            ASSET=$(curl -sL https://api.github.com/repos/nilaoda/N_m3u8DL-RE/releases/latest \
+              | jq -r '.assets[] | select(.name | test("linux-x64.*\\.tar\\.gz$")) | .browser_download_url' | head -1)
+            curl -sL -o /tmp/nm3u8dlre.tar.gz "$ASSET"
+            tar xzf /tmp/nm3u8dlre.tar.gz -C "$HOME/tools" && chmod +x "$HOME/tools/N_m3u8DL-RE"
+            NM_SRC="downloaded-on-miss"; fi
+          if [ -x "$HOME/tools/ffmpeg" ]; then FFMPEG_SRC="cache-hit(static)"; else
+            FFMPEG_SRC="missing-unexpected"; fi
+          echo "$HOME/tools" >> "$GITHUB_PATH"
+          export PATH="$HOME/tools:$PATH"
+          # صورة السيرفر: load من الكاش (ثوانٍ) أو pull مرة واحدة ثم save للكاش
+          if docker image inspect "$TG_IMAGE" >/dev/null 2>&1; then IMG_SRC="present";
+          elif [ -f "$HOME/docker-cache/tgbotapi.tar" ]; then
+            docker load -i "$HOME/docker-cache/tgbotapi.tar" >/dev/null && IMG_SRC="cache-hit(load)";
+          else
+            docker pull "$TG_IMAGE" && docker save -o "$HOME/docker-cache/tgbotapi.tar" "$TG_IMAGE" && IMG_SRC="pulled-on-miss"; fi
+          T1=$(date +%s.%N)
+          echo "TOOLS_SETUP_SECONDS=$(echo "$T1 - $T0" | bc) (tools-hit=${{ steps.tools-cache.outputs.cache-hit }} img-hit=${{ steps.img-cache.outputs.cache-hit }})"
+          echo "TOOLS_NM3U8DLRE_SRC=$NM_SRC | TOOLS_FFMPEG_SRC=$FFMPEG_SRC | TGIMG_SRC=$IMG_SRC"
+
+      - name: Extract master + download 1080p (N_m3u8DL-RE)
+        id: dl
+        run: |
+          node exFaselHD1234.js "${{ inputs.page_url }}" | tee extract.log
+          MASTER=$(grep -oP '^Link:\s*\Khttps?://\S+' extract.log | head -1)
+          [ -n "$MASTER" ] || { echo "FAILED to extract master"; exit 1; }
+          python3 scripts/monitor.py --out /tmp/mon_dl.csv & echo $! > /tmp/mon.pid
+          START_UTC=$(date -u +%FT%TZ); T0=$(date +%s.%N)
+          echo "DOWNLOAD_START_UTC=$START_UTC"
+          echo "dl_start_utc=$START_UTC" >> "$GITHUB_OUTPUT"
+          mkdir -p dl
+          N_m3u8DL-RE "$MASTER" --auto-select --thread-count "${{ inputs.threads }}" -mt \
+            --save-dir ./dl --save-name fasel_1080p \
+            -H "User-Agent: $UA" -H "Referer: https://www.fasel-hd.co/" \
+            --no-log --log-level INFO | tee nm3u8dlre.log
+          T1=$(date +%s.%N); END_UTC=$(date -u +%FT%TZ)
+          DT=$(echo "$T1 - $T0" | bc)
+          F=$(ls -S ./dl/* 2>/dev/null | head -1 || true)
+          SZ=$(stat -c%s "$F" 2>/dev/null || echo 0)
+          echo "VIDEO_PATH=$F" >> "$GITHUB_ENV"
+          echo "DOWNLOAD_END_UTC=$END_UTC | DOWNLOAD_DURATION_MIN=$(python3 -c "print(round($DT/60,2))") (${DT}s)"
+          echo "RESULT_SIZE_MB=$(python3 -c "print(round($SZ/1024/1024,1))")"
+          echo "dl_end_utc=$END_UTC" >> "$GITHUB_OUTPUT"
+          echo "dl_dt=$DT" >> "$GITHUB_OUTPUT"
+          echo "dl_size=$SZ" >> "$GITHUB_OUTPUT"
+          ffprobe -v error -show_entries stream=codec_name,width,height -of default=noprint_wrappers=1 "$F" | head -8
+          kill $(cat /tmp/mon.pid) 2>/dev/null || true; sleep 2
+          python3 scripts/monitor.py --summarize /tmp/mon_dl.csv --label DL | tee mon_dl_report.txt
+
+      - name: Start local Bot API server (prebuilt image, no build)
+        run: |
+          docker run -d --name tgbotapi --restart no -p 8081:8081 \
+            -e TELEGRAM_API_ID="${{ secrets.TELEGRAM_API_ID }}" \
+            -e TELEGRAM_API_HASH="${{ secrets.TELEGRAM_API_HASH }}" \
+            -e TELEGRAM_LOCAL=1 \
+            "$TG_IMAGE" --local >/dev/null
+          for i in $(seq 1 60); do
+            if curl -s -o /dev/null "http://127.0.0.1:8081/bot${{ secrets.TELEGRAM_BOT_TOKEN }}/getMe"; then
+              echo "BOTAPI_READY after ~${i}s"; break; fi
+            sleep 2
+            [ "$i" = "60" ] && { echo "Bot API server failed to start"; docker logs tgbotapi 2>&1 | tail -20; exit 1; }
+          done
+          curl -s "http://127.0.0.1:8081/bot${{ secrets.TELEGRAM_BOT_TOKEN }}/getMe" | head -c 300; echo
+
+      - name: Upload MP4 to Telegram (split >1.9GB, 429-aware)
+        id: up
+        run: |
+          export TG_TOKEN="${{ secrets.TELEGRAM_BOT_TOKEN }}"
+          UP0=$(date +%s.%N); UP_START=$(date -u +%FT%TZ)
+          python3 scripts/tg_upload.py --file "$VIDEO_PATH" \
+            --api-base http://127.0.0.1:8081 \
+            --chat-id "${{ secrets.TELEGRAM_CHAT_ID }}" \
+            --caption "$(basename "$VIDEO_PATH") 1080p | ${{ inputs.page_url }}" \
+            --out ./tg-results | tee tg-upload.log
+          UP1=$(date +%s.%N)
+          echo "UPLOAD_START_UTC=$UP_START | UPLOAD_END_UTC=$(date -u +%FT%TZ)"
+          echo "UPLOAD_DURATION_MIN=$(python3 -c "print(round(($UP1-$UP0)/60,2))")"
+          python3 - <<'PY'
+          import json
+          r = json.load(open('tg-results/upload-report.json'))
+          print(f"RESULT_UPLOAD_ALL={'OK' if r['all_ok'] else 'FAIL'} "
+                f"parts={len(r['parts'])}/{len(r['parts'])} size={r['total_bytes']/1024/1024:.1f}MB "
+                f"in {r['wall_minutes']}min")
+          for p in r['parts']:
+              print(f"RESULT_PART_{p['part']}=message_id={p.get('message_id')} "
+                    f"{p['bytes']/1024/1024:.0f}MB in {p['seconds']}s = {p.get('mbps')} Mbps")
+          # ملف md من نفس البيانات
+          lines = ['# Telegram upload report', '',
+                   f"Source: `{r['file']}` ({r['total_bytes']/1024/1024:.1f} MB)", '',
+                   '| Part | Size (MB) | Duration (s) | Avg speed | message_id |',
+                   '|---|---|---|---|---|']
+          for p in r['parts']:
+              lines.append(f"| {p['part']}/{p['of']} | {p['bytes']/1024/1024:.0f} | "
+                           f"{p['seconds']} | {p.get('mbps')} Mbps | {p.get('message_id')} |")
+          lines += ['', f"Total wall time: **{r['wall_minutes']} min** — "
+                       f"status: **{'OK' if r['all_ok'] else 'FAIL'}**",
+                    '', 'Rejoin parts: `cat *.part* > movie.mp4`']
+          open('tg-results/upload-report.md', 'w').write('\n'.join(lines) + '\n')
+          PY
+
+      - name: Summary
+        if: always()
+        run: |
+          {
+            echo "## Telegram upload — ${{ inputs.page_url }} (x${{ inputs.threads }})"
+            echo ""
+            echo "| البند | القيمة |"
+            echo "|---|---|"
+            echo "| بدء التحميل | ${{ steps.dl.outputs.dl_start_utc }} |"
+            echo "| انتهاء التحميل | ${{ steps.dl.outputs.dl_end_utc }} |"
+            echo "| مدة التحميل | ${{ steps.dl.outputs.dl_dt }}s |"
+            echo "| حجم MP4 | ${{ steps.dl.outputs.dl_size }} bytes |"
+            echo ""
+            echo "تفاصيل الرفع (الأجزاء + message_id): انظر `upload-report.md` في الـ artifact."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Stop server + delete video (no-store policy)
+        if: always()
+        run: |
+          docker stop tgbotapi 2>/dev/null || true; docker rm tgbotapi 2>/dev/null || true
+          rm -rf ./dl
+          echo "Video + server removed. Remaining:"; ls -la
+
+      - name: Upload md + logs artifact (no video)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: telegram-upload-report
+          path: |
+            tg-results/
+            extract.log
+            nm3u8dlre.log
+            tg-upload.log
+            mon_dl_report.txt
+          if-no-files-found: warn
+          retention-days: 7
