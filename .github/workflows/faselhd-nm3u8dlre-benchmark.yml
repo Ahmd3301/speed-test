@@ -1,0 +1,204 @@
+name: FaselHD N_m3u8DL-RE Benchmark
+
+# اختبار مركّز: N_m3u8DL-RE فقط (بدون ffmpeg التسلسلي وبدون عينات Node).
+# يقيس: وقت البدء/الانتهاء (UTC)، مدة التنزيل، متوسط السرعة، متوسط CPU/RAM.
+# سياسة عدم التخزين: الفيديو يُحذف قبل رفع الـ artifact (لوجات فقط).
+#
+# التشغيل عبر gh:
+#   gh workflow run "FaselHD N_m3u8DL-RE Benchmark" --ref main --repo Ahmd3301/speed-test \
+#     -f page_url="https://www.fasel-hd.co/?p=228502" -f threads="16"
+#   gh run watch <run-id> --repo Ahmd3301/speed-test
+
+on:
+  workflow_dispatch:
+    inputs:
+      page_url:
+        description: 'Fasel-HD episode page URL'
+        required: false
+        default: 'https://www.fasel-hd.co/?p=228502'
+        type: string
+      threads:
+        description: 'N_m3u8DL-RE thread count'
+        required: false
+        default: '16'
+        type: string
+
+permissions:
+  contents: read
+  actions: read
+
+env:
+  UA: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36'
+
+jobs:
+  nm3u8dlre-only:
+    name: N_m3u8DL-RE x${{ inputs.threads }} (${{ inputs.page_url }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Runner hardware (brief)
+        run: |
+          echo "CPUS=$(nproc) | $(lscpu | awk -F': +' '/Model name/{print $2; exit}') | $(free -h | awk '/^Mem:/{print $2}')"
+
+      - name: Restore tools cache
+        id: tools-cache
+        uses: actions/cache@v4
+        with:
+          path: ~/tools
+          key: Linux-tools-nm3u8dlre-ffmpegstatic-v2
+          restore-keys: |
+            Linux-tools-
+
+      - name: Setup tools (cached expected)
+        run: |
+          T0=$(date +%s.%N)
+          mkdir -p ~/tools
+          if [ -x "$HOME/tools/N_m3u8DL-RE" ] && "$HOME/tools/N_m3u8DL-RE" --help >/dev/null 2>&1; then
+            NM_SRC="cache-hit"
+          else
+            ASSET=$(curl -sL https://api.github.com/repos/nilaoda/N_m3u8DL-RE/releases/latest \
+              | jq -r '.assets[] | select(.name | test("linux-x64.*\\.tar\\.gz$")) | .browser_download_url' | head -1)
+            curl -sL -o /tmp/nm3u8dlre.tar.gz "$ASSET"
+            tar xzf /tmp/nm3u8dlre.tar.gz -C "$HOME/tools" && chmod +x "$HOME/tools/N_m3u8DL-RE"
+            NM_SRC="downloaded-on-miss"
+          fi
+          if [ -x "$HOME/tools/ffmpeg" ] && [ -x "$HOME/tools/ffprobe" ]; then
+            FFMPEG_SRC="cache-hit(static)"
+          elif command -v ffmpeg >/dev/null 2>&1; then
+            FFMPEG_SRC="preinstalled"
+          else
+            sudo apt-get update -qq && sudo apt-get install -y -qq ffmpeg
+            FFMPEG_SRC="apt-installed"
+          fi
+          echo "$HOME/tools" >> "$GITHUB_PATH"
+          export PATH="$HOME/tools:$PATH"
+          T1=$(date +%s.%N)
+          echo "TOOLS_SETUP_SECONDS=$(echo "$T1 - $T0" | bc) (cache-hit=${{ steps.tools-cache.outputs.cache-hit }})"
+          echo "TOOLS_FFMPEG_SRC=$FFMPEG_SRC | TOOLS_NM3U8DLRE_SRC=$NM_SRC"
+
+      - name: Extract master + select 1080p
+        id: prep
+        run: |
+          node exFaselHD1234.js "${{ inputs.page_url }}" | tee extract.log
+          MASTER=$(grep -oP '^Link:\s*\Khttps?://\S+' extract.log | head -1)
+          [ -n "$MASTER" ] || { echo "FAILED to extract master"; exit 1; }
+          echo "master_url=$MASTER" >> "$GITHUB_OUTPUT"
+          export MASTER_URL="$MASTER"
+          curl -sL -A "$UA" "$MASTER" -o master.m3u8
+          export P1080_URL=$(python3 - <<'PY'
+          import os, re, urllib.parse
+          master = open('master.m3u8').read()
+          base = os.environ['MASTER_URL']
+          variants = []
+          for m in re.finditer(r'#EXT-X-STREAM-INF:([^\n]+)\n([^\n]+)', master):
+              attrs, uri = m.group(1), m.group(2).strip()
+              bw = int(re.search(r'BANDWIDTH=(\d+)', attrs).group(1)) if 'BANDWIDTH' in attrs else 0
+              res = (re.search(r'RESOLUTION=(\d+x\d+)', attrs).group(1) if 'RESOLUTION' in attrs else 'unknown')
+              variants.append((bw, res, urllib.parse.urljoin(base, uri)))
+          variants.sort(reverse=True)
+          best = next((v for v in variants if v[1] == '1920x1080'), variants[0])
+          print(best[2])
+          PY
+          )
+          curl -sL -A "$UA" "$P1080_URL" -o p1080.m3u8
+          python3 - <<'PY'
+          import re
+          master = open('master.m3u8').read()
+          for m in re.finditer(r'#EXT-X-STREAM-INF:([^\n]+)', master):
+              print('VARIANT ' + m.group(1)[:80])
+          t = open('p1080.m3u8').read()
+          segs = len(re.findall(r'\.ts', t))
+          dur = sum(float(x) for x in re.findall(r'#EXTINF:([0-9.]+)', t))
+          print(f"SELECTED_1080P segments={segs} duration_s={dur:.1f} encrypted={'#EXT-X-KEY' in t}")
+          PY
+
+      - name: Start resource monitor
+        run: |
+          python3 scripts/monitor.py --out /tmp/mon.csv & echo $! > /tmp/mon.pid
+          echo "monitor pid=$(cat /tmp/mon.pid)"
+
+      - name: Download full 1080p with N_m3u8DL-RE (timed)
+        id: dl
+        run: |
+          mkdir -p dl
+          START_EPOCH=$(date +%s); START_UTC=$(date -u +%FT%TZ)
+          echo "DOWNLOAD_START_UTC=$START_UTC"
+          T0=$(date +%s.%N)
+          N_m3u8DL-RE "${{ steps.prep.outputs.master_url }}" \
+            --auto-select \
+            --thread-count "${{ inputs.threads }}" \
+            -mt \
+            --save-dir ./dl --save-name fasel_1080p \
+            -H "User-Agent: $UA" -H "Referer: https://www.fasel-hd.co/" \
+            --no-log --log-level INFO | tee nm3u8dlre.log
+          T1=$(date +%s.%N)
+          END_EPOCH=$(date +%s); END_UTC=$(date -u +%FT%TZ)
+          DT=$(echo "$T1 - $T0" | bc)
+          F=$(ls -S ./dl/* 2>/dev/null | head -1 || true)
+          SZ=$(stat -c%s "$F" 2>/dev/null || echo 0)
+          MBPS=$(python3 -c "print(${SZ}*8/${DT}/1e6 if ${DT}>0 else 0)")
+          echo "DOWNLOAD_START_UTC=$START_UTC | DOWNLOAD_END_UTC=$END_UTC"
+          echo "DOWNLOAD_DURATION_MIN=$(python3 -c "print(round(${DT}/60,2))") (${DT}s)"
+          echo "RESULT_SIZE_MB=$(python3 -c "print(round(${SZ}/1024/1024,1))")"
+          echo "RESULT_AVG_MBPS=$MBPS"
+          echo "--- ffprobe verify (codecs only) ---"
+          ffprobe -v error -show_entries stream=codec_name,width,height -of default=noprint_wrappers=1 "$F" | head -8
+          {
+            echo "start_utc=$START_UTC" >> "$GITHUB_OUTPUT"
+            echo "end_utc=$END_UTC" >> "$GITHUB_OUTPUT"
+            echo "dt=$DT" >> "$GITHUB_OUTPUT"
+            echo "size=$SZ" >> "$GITHUB_OUTPUT"
+            echo "mbps=$MBPS" >> "$GITHUB_OUTPUT"
+          }
+
+      - name: Stop monitor + resource report
+        if: always()
+        run: |
+          kill $(cat /tmp/mon.pid) 2>/dev/null || true
+          sleep 2
+          python3 scripts/monitor.py --summarize /tmp/mon.csv --label DL | tee mon_report.txt
+
+      - name: Summary
+        if: always()
+        run: |
+          {
+            echo "## N_m3u8DL-RE x${{ inputs.threads }} — ${{ inputs.page_url }}"
+            echo ""
+            echo "| البند | القيمة |"
+            echo "|---|---|"
+            echo "| بدء التنزيل (UTC) | ${{ steps.dl.outputs.start_utc }} |"
+            echo "| انتهاء التنزيل (UTC) | ${{ steps.dl.outputs.end_utc }} |"
+            echo "| مدة التنزيل | ${{ steps.dl.outputs.dt }}s |"
+            echo "| متوسط السرعة | ${{ steps.dl.outputs.mbps }} Mbps |"
+            echo "| حجم الملف | ${{ steps.dl.outputs.size }} bytes |"
+            echo ""
+            echo "موارد الـ Runner (MON_DL_* في اللوج): انظر mon_report.txt في الـ artifact."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Delete video (no-store policy)
+        if: always()
+        run: |
+          rm -rf ./dl
+          echo "Video deleted. Remaining:"; ls -la
+
+      - name: Upload logs artifact (no video)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: nm3u8dlre-${{ inputs.threads }}t
+          path: |
+            extract.log
+            master.m3u8
+            p1080.m3u8
+            nm3u8dlre.log
+            mon_report.txt
+          if-no-files-found: warn
+          retention-days: 7
