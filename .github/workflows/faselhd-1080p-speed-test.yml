@@ -84,8 +84,11 @@ jobs:
           # https://github.com/nilaoda/N_m3u8DL-RE
           TAG=$(curl -sL https://api.github.com/repos/nilaoda/N_m3u8DL-RE/releases/latest | jq -r .tag_name)
           echo "NM3U8DLRE_TAG=$TAG"
-          curl -sL -o /tmp/nm3u8dlre.tar.gz \
-            "https://github.com/nilaoda/N_m3u8DL-RE/releases/download/${TAG}/N_m3u8DL-RE_Beta_linux-x64_${TAG}.tar.gz"
+          ASSET=$(curl -sL https://api.github.com/repos/nilaoda/N_m3u8DL-RE/releases/latest \
+            | jq -r '.assets[] | select(.name | test("linux-x64.*\\.tar\\.gz$")) | .browser_download_url' | head -1)
+          echo "NM3U8DLRE_ASSET=$ASSET"
+          [ -n "$ASSET" ] || { echo "No linux-x64 asset found"; exit 1; }
+          curl -sL -o /tmp/nm3u8dlre.tar.gz "$ASSET"
           mkdir -p "$HOME/nm3u8dlre" && tar xzf /tmp/nm3u8dlre.tar.gz -C "$HOME/nm3u8dlre"
           chmod +x "$HOME/nm3u8dlre/N_m3u8DL-RE"
           "$HOME/nm3u8dlre/N_m3u8DL-RE" --help | head -5
