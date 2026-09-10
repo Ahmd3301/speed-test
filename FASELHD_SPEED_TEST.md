@@ -1,7 +1,9 @@
 # اختبار سرعة تحميل 1080p من Fasel-HD بأقصى سرعة (داخل GitHub Actions)
 
 > كل القياسات الثقيلة تمت **داخل GitHub-hosted runner** (وليس على جهاز محلي) للاستفادة من شبكته وقوته.
-> رابط التشغيل الموثّق: https://github.com/Ahmd3301/speed-test/actions/runs/34493978594
+> - التشغيل الأول (?p=271259): https://github.com/Ahmd3301/speed-test/actions/runs/34493978594
+> - التشغيل الثاني (?p=228502): https://github.com/Ahmd3301/speed-test/actions/runs/34497341861
+> - إثبات الكاش (hit): https://github.com/Ahmd3301/speed-test/actions/runs/34500620768
 
 ## 1) بيئة الاختبار (إثبات 4-core)
 
@@ -94,13 +96,58 @@ gh run watch <run-id> --repo Ahmd3301/speed-test
 gh run download <run-id> --repo Ahmd3301/speed-test -n faselhd-speed-results -D ./run-results
 ```
 
-المدخلات الاختيارية: `page_url` (افتراضي `?p=271259`)، `threads` (افتراضي 16)، `sample_segments` (افتراضي 30)، `full_download` (افتراضي true).
+المدخلات الاختيارية: `page_url` (افتراضي `?p=228502`)، `threads` (افتراضي 16)، `sample_segments` (افتراضي 30)، `full_download` (افتراضي true).
 
 ## 8) الملفات
 
 | الملف | الوظيفة |
 |---|---|
-| `.github/workflows/faselhd-1080p-speed-test.yml` | الـ Action الجديد (استخراج → اختيار 1080p → 4 طرق قياس → remux → مقارنة → artifact) |
+| `.github/workflows/faselhd-1080p-speed-test.yml` | الـ Action الجديد (cache أدوات → استخراج → اختيار 1080p → 4 طرق قياس + مراقبة موارد → remux + مراقبة → حذف الفيديو → artifact نصي) |
 | `scripts/faselhd-speed-test.mjs` | مقارنة sequential/parallel على نفس العينة + تحميل كامل اختياري (Node فقط، بدون dependencies) |
+| `scripts/monitor.py` | مراقبة CPU/RAM/الشبكة كل ثانية (stdlib فقط عبر `/proc`) + تلخيص كل مرحلة |
 | `exFaselHD1234.js` | استخراج رابط الـ Master من صفحة fasel-hd |
 | `.github/workflows/speed-test.yml` | الـ Action القديم (بنچمارك عتاد الـ Runner: CPU/RAM/Disk/Network) — بقي كما هو |
+
+## 9) تخزين الأدوات — إعداد فوري بعد أول تشغيل (مُثبت بالأرقام)
+
+المشكلة: كل run يعمل على VM جديدة، وكان الإعداد يُعيد `apt install ffmpeg` + تحميل N_m3u8DL-RE (~21.6s).
+الحل (موثّق): [`actions/cache`](https://docs.github.com/en/actions/reference/workflows-and-actions/dependency-caching) يحفظ مجلد `~/tools` (يحوي N_m3u8DL-RE + نسخة ffmpeg/ffprobe الـ static من johnvansickle) بين التشغيلات. اكتُشف أيضاً أن **ffmpeg غير مثبت مسبقاً** على صورة ubuntu-24.04 (احتاج apt) — لذلك خُزّنت نسخة static لتفادي apt تماماً.
+
+| التشغيل | حالة الكاش | زمن خطوة الإعداد المقاس |
+|---|---|---|
+| `34497341861` (أول مفتاح جديد) | miss → حمّل الأدوات وحفظ الكاش (`Cache saved with key: Linux-tools-nm3u8dlre-v1`) | **21.6s** |
+| `34500620768` (إثبات) | **`Cache restored from key: Linux-tools-nm3u8dlre-ffmpegstatic-v2`** | **`TOOLS_SETUP_SECONDS=0.017s`** (`cache-hit=true`، المصدران `cache-hit`) |
+
+> الصدق العلمي: الـ 0.017s هي زمن خطوة الفحص والتفعيل نفسها؛ استعادة الكاش من خوادم GitHub تستغرق بضع ثوانٍ إضافية (ظاهرة كخطوة `Restore tools cache`) — لكن لا يوجد أي `apt` ولا أي تحميل خارجي بعد أول تشغيل.
+
+## 10) التشغيل الثاني: `?p=228502` — فيلم Oppenheimer 2023 (run `34497341861`, استغرق 25m29s)
+
+- الـ 1080p: **6228 مقطع**، المدة **10822s (~3 ساعات)**، `bw=2251732`، بدون تشفير، MPEG-TS.
+- العينة (30 مقطع = 15.58MB): تسلسلي **7.2 Mbps** مقابل متوازي x16 **41.0 Mbps** — تسريع **5.71x**، فشل 0.
+- الملف الكامل (**2911.5MB**):
+  - N_m3u8DL-RE (x16): **178.3s = 137.0 Mbps**
+  - ffmpeg (تسلسلي): **1257.6s (20.9 دقيقة) = 19.4 Mbps** — أي N_m3u8DL-RE أسرع **~7x**.
+
+### 10.1 موارد الـ Runner أثناء التحميل (مراقبة كل ثانية، 1469 عيّنة = 24.5 دقيقة)
+
+| المورد | المتوسط | الذروة |
+|---|---|---|
+| الزمن | **24.5 دقيقة** | — |
+| CPU | **2.1%** (التحميل I/O-bound) | 50.0% |
+| RAM | **1066MB** | 1838MB / 15990MB |
+| الشبكة (استقبال) | **36.5 Mbps** | **317.3 Mbps** (إجمالي 6695MB ≈ التحميلان الكاملان + العينات) |
+
+### 10.2 التحويل إلى MP4 (مرحلة مستقلة، 23 عيّنة + جدار زمني 18.1s لملف 2.9GB)
+
+| المورد | المتوسط | الذروة |
+|---|---|---|
+| الزمن | **0.38 دقيقة (23s)** — الجدار الفعلي للـ remux **18.1s** | — |
+| CPU | **22.5%** | 40.9% |
+| RAM | **1086MB** | 1133MB / 15990MB |
+| الشبكة | **0.0** (لا شبكة — عملية محلية بحتة) | 0.0 |
+
+> معدل الـ remux ≈ ‏2.9GB/18s ≈ ‏**1.3Gbps** — وهذا وحده يثبت أنه تغيير حاوية فقط (`-c copy`) لا re-encode.
+
+## 11) سياسة عدم التخزين (مؤكدة)
+
+خطوة `Delete all video files` تحذف `ffmpeg_1080p.mp4` و`remux_faststart.mp4` ومجلد `dl-nm3u8dlre/` **قبل** رفع الـ artifact. الـ artifact (7 أيام) يحوي لوجات و`results.json` وملفات `.m3u8` فقط — **لا يوجد أي MP4** في أي مكان دائم، وVM الـ Runner تُدمَّر بعد الـ job.
