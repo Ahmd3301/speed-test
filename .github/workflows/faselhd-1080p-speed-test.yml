@@ -1,0 +1,269 @@
+name: FaselHD 1080p Max-Speed Test
+
+# الهدف: اختبار تحميل جودة 1080p من سيرفر fasel-hd (scdns.io) بأقصى سرعة
+# داخل GitHub-hosted runner (ubuntu-latest = 4 vCPU / 16GB RAM / VM جديدة لكل run)
+# المرجع: https://docs.github.com/en/actions/reference/runners/github-hosted-runners
+#
+# التشغيل عبر gh:
+#   gh workflow run "FaselHD 1080p Max-Speed Test" --ref main
+#   gh run list --workflow faselhd-1080p-speed-test.yml
+#   gh run watch <run-id>
+#   gh run download <run-id> -n faselhd-speed-results
+
+on:
+  workflow_dispatch:
+    inputs:
+      page_url:
+        description: 'Fasel-HD episode page URL'
+        required: false
+        default: 'https://www.fasel-hd.co/?p=271259'
+        type: string
+      threads:
+        description: 'Parallel download threads'
+        required: false
+        default: '16'
+        type: string
+      sample_segments:
+        description: 'Segments for seq-vs-par comparison'
+        required: false
+        default: '30'
+        type: string
+      full_download:
+        description: 'Download full 1080p + remux to MP4'
+        required: false
+        default: true
+        type: boolean
+
+permissions:
+  contents: read
+  actions: read
+
+env:
+  UA: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36'
+
+jobs:
+  max-speed-test:
+    name: 1080p max-speed (ubuntu-latest, 4-core)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Runner hardware info (prove 4-core container)
+        run: |
+          echo "::group::Runner hardware (4 vCPU / 16GB per docs)"
+          echo "DOC_REF=https://docs.github.com/en/actions/reference/runners/github-hosted-runners"
+          uname -a
+          lscpu | grep -E "Model name|Socket|Core\(|Thread\(|CPU\(s\)" || true
+          echo "TOTAL_CPUS=$(nproc)"
+          free -h
+          df -h / | head -5
+          echo "::endgroup::"
+
+      - name: Install ffmpeg + yt-dlp + aria2
+        run: |
+          echo "::group::Install tools"
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq ffmpeg aria2 curl jq
+          ffmpeg -version | head -2
+          aria2c --version | head -1
+          python3 -m pip install -q --upgrade yt-dlp
+          yt-dlp --version
+          echo "::endgroup::"
+
+      - name: Install N_m3u8DL-RE (latest, fastest HLS downloader)
+        run: |
+          echo "::group::Install N_m3u8DL-RE"
+          # أسرع أداة HLS حسب البنشماركات: تحميل متوازي + اختيار تلقائي لأعلى جودة
+          # https://github.com/nilaoda/N_m3u8DL-RE
+          TAG=$(curl -sL https://api.github.com/repos/nilaoda/N_m3u8DL-RE/releases/latest | jq -r .tag_name)
+          echo "NM3U8DLRE_TAG=$TAG"
+          curl -sL -o /tmp/nm3u8dlre.tar.gz \
+            "https://github.com/nilaoda/N_m3u8DL-RE/releases/download/${TAG}/N_m3u8DL-RE_Beta_linux-x64_${TAG}.tar.gz"
+          mkdir -p "$HOME/nm3u8dlre" && tar xzf /tmp/nm3u8dlre.tar.gz -C "$HOME/nm3u8dlre"
+          chmod +x "$HOME/nm3u8dlre/N_m3u8DL-RE"
+          "$HOME/nm3u8dlre/N_m3u8DL-RE" --help | head -5
+          echo "$HOME/nm3u8dlre" >> "$GITHUB_PATH"
+          echo "::endgroup::"
+
+      - name: Extract master link (exFaselHD1234.js)
+        id: extract
+        run: |
+          echo "::group::Extract master"
+          node exFaselHD1234.js "${{ inputs.page_url }}" | tee extract.log
+          MASTER=$(grep -oP '^Link:\s*\Khttps?://\S+' extract.log | head -1)
+          if [ -z "$MASTER" ]; then echo "FAILED to extract master"; cat extract.log; exit 1; fi
+          echo "MASTER_URL=$MASTER"
+          echo "master_url=$MASTER" >> "$GITHUB_OUTPUT"
+          curl -sL -A "$UA" "$MASTER" -o master.m3u8
+          echo "--- master.m3u8 ---"; cat master.m3u8
+          echo "::endgroup::"
+
+      - name: Select 1080p variant playlist
+        id: variant
+        run: |
+          echo "::group::Select 1080p"
+          python3 - <<'PY'
+          import os, re, urllib.parse
+          master = open('master.m3u8').read()
+          base = os.environ.get('MASTER_URL', '')
+          variants = []
+          for m in re.finditer(r'#EXT-X-STREAM-INF:([^\n]+)\n([^\n]+)', master):
+              attrs, uri = m.group(1), m.group(2).strip()
+              bw = int(re.search(r'BANDWIDTH=(\d+)', attrs).group(1)) if 'BANDWIDTH' in attrs else 0
+              res = re.search(r'RESOLUTION=(\d+x\d+)', attrs)
+              res = res.group(1) if res else 'unknown'
+              uri = urllib.parse.urljoin(base, uri)
+              variants.append((bw, res, uri))
+          variants.sort(reverse=True)
+          for bw, res, uri in variants:
+              print(f"VARIANT res={res} bw={bw} uri={uri[:100]}...")
+          best = next((v for v in variants if v[1] == '1920x1080'), variants[0])
+          print(f"SELECTED_1080P res={best[1]} bw={best[0]}")
+          open(os.environ['GITHUB_OUTPUT'], 'a').write(f"p1080_url={best[2]}\n")
+          open('p1080.url', 'w').write(best[2])
+          PY
+          echo "P1080_URL=$(cat p1080.url)"
+          curl -sL -A "$UA" "$(cat p1080.url)" -o p1080.m3u8
+          echo "segments=$(grep -c '\.ts' p1080.m3u8 || true) duration=$(grep -oP '#EXTINF:\K[0-9.]+' p1080.m3u8 | awk '{s+=$1} END {print s}')s encrypted=$(grep -c '#EXT-X-KEY' p1080.m3u8 || true)"
+          echo "::endgroup::"
+        env:
+          MASTER_URL: ${{ steps.extract.outputs.master_url }}
+
+      - name: 'Method 1+2: Node seq vs parallel (same sample)'
+        run: |
+          echo "::group::Node seq vs parallel"
+          node scripts/faselhd-speed-test.mjs \
+            --master "${{ steps.extract.outputs.master_url }}" \
+            --threads "${{ inputs.threads }}" \
+            --sample "${{ inputs.sample_segments }}" \
+            --out ./speed-results | tee node-test.log
+          echo "::endgroup::"
+
+      - name: 'Method 3: N_m3u8DL-RE full 1080p (parallel best)'
+        id: nm3u8dlre
+        if: inputs.full_download == true
+        run: |
+          echo "::group::N_m3u8DL-RE parallel"
+          mkdir -p dl-nm3u8dlre
+          T0=$(date +%s.%N)
+          N_m3u8DL-RE "${{ steps.extract.outputs.master_url }}" \
+            --auto-select \
+            --thread-count "${{ inputs.threads }}" \
+            -mt \
+            --save-dir ./dl-nm3u8dlre --save-name fasel_1080p \
+            -H "User-Agent: $UA" -H "Referer: https://www.fasel-hd.co/" \
+            --no-log --log-level INFO | tee nm3u8dlre.log
+          T1=$(date +%s.%N)
+          DT=$(echo "$T1 - $T0" | bc)
+          F=$(ls -S ./dl-nm3u8dlre/* 2>/dev/null | head -1 || true)
+          SZ=$(stat -c%s "$F" 2>/dev/null || echo 0)
+          MBPS=$(python3 -c "print(${SZ}*8/${DT}/1e6 if ${DT}>0 else 0)")
+          echo "RESULT_NM3U8DLRE_FULL=$(python3 -c "print(${SZ}/1024/1024)") MB in ${DT}s = ${MBPS} Mbps (file=$F)"
+          echo "dt=$DT" >> "$GITHUB_OUTPUT"
+          echo "size=$SZ" >> "$GITHUB_OUTPUT"
+          echo "mbps=$MBPS" >> "$GITHUB_OUTPUT"
+          echo "::endgroup::"
+
+      - name: 'Method 4: ffmpeg sequential baseline (1 connection)'
+        id: ffseq
+        if: inputs.full_download == true
+        run: |
+          echo "::group::ffmpeg sequential"
+          T0=$(date +%s.%N)
+          # ffmpeg يحمّل HLS تسلسلياً (اتصال واحد + http_multiple=2 prefetch فقط)
+          # المرجع: https://ffmpeg.org/pipermail/ffmpeg-user/2017-January/034980.html
+          timeout 1500 ffmpeg -hide_banner -y \
+            -user_agent "$UA" -headers "Referer: https://www.fasel-hd.co/" \
+            -i "$(cat p1080.url)" \
+            -c copy -bsf:a aac_adtstoasc -movflags +faststart \
+            ffmpeg_1080p.mp4 2>&1 | tee ffmpeg-seq.log | tail -5
+          T1=$(date +%s.%N)
+          DT=$(echo "$T1 - $T0" | bc)
+          SZ=$(stat -c%s ffmpeg_1080p.mp4 2>/dev/null || echo 0)
+          MBPS=$(python3 -c "print(${SZ}*8/${DT}/1e6 if ${DT}>0 else 0)")
+          echo "RESULT_FFMPEG_SEQ=$(python3 -c "print(${SZ}/1024/1024)") MB in ${DT}s = ${MBPS} Mbps"
+          echo "dt=$DT" >> "$GITHUB_OUTPUT"
+          echo "size=$SZ" >> "$GITHUB_OUTPUT"
+          echo "mbps=$MBPS" >> "$GITHUB_OUTPUT"
+          echo "::endgroup::"
+
+      - name: 'Remux check: TS -> MP4 with minimal resources (-c copy)'
+        if: inputs.full_download == true
+        run: |
+          echo "::group::Remux check (no re-encode)"
+          # تحويل الحاوية فقط بدون معالجة: -c copy لا يلمس الكودك، CPU ~ صفر
+          # + aac_adtstoasc ضروري لصوت AAC القادم من TS إلى MP4
+          # + faststart ينقل moov للمقدمة للبث المباشر
+          ls -la ./dl-nm3u8dlre/ ffmpeg_1080p.mp4 2>/dev/null || true
+          for F in ./dl-nm3u8dlre/* ffmpeg_1080p.mp4; do
+            [ -f "$F" ] || continue
+            echo "--- ffprobe: $F ---"
+            ffprobe -v error -show_entries stream=codec_name,width,height,avg_frame_rate,codec_type \
+              -of default=noprint_wrappers=1 "$F" | head -12
+          done
+          /usr/bin/time -v ffmpeg -hide_banner -y -i ffmpeg_1080p.mp4 \
+            -c copy -movflags +faststart remux_faststart.mp4 2>&1 | grep -E "Maximum resident|Elapsed|Percent of CPU" || true
+          echo "REMUX_CMD=ffmpeg -i in.ts -c copy -bsf:a aac_adtstoasc -movflags +faststart out.mp4"
+          echo "::endgroup::"
+
+      - name: Final comparison table + verdict
+        if: always()
+        run: |
+          echo "::group::Comparison"
+          python3 - <<'PY'
+          import json, os
+          node_res = {}
+          try:
+              node_res = json.load(open('speed-results/results.json'))
+          except Exception as e:
+              print("no node results.json:", e)
+          seq = node_res.get('test_sequential', {})
+          par = node_res.get('test_parallel', {})
+          print(f"RESULT_SEQ_NODE={seq.get('mbps')} Mbps ({seq.get('segments')} segs, {seq.get('ms')}ms)")
+          print(f"RESULT_PAR_NODE={par.get('mbps')} Mbps (x{par.get('threads')}, speedup {par.get('speedup_vs_sequential')}x)")
+          for k in ('throttle', 'parallel'):
+              print(f"VERDICT_{k}=" + str(node_res.get('verdicts', {}).get(k, '?')))
+          print(f"RESULT_NM3U8DLRE={os.environ.get('NM_MBPS','?')} Mbps in {os.environ.get('NM_DT','?')}s")
+          print(f"RESULT_FFMPEG_SEQ={os.environ.get('FF_MBPS','?')} Mbps in {os.environ.get('FF_DT','?')}s")
+          PY
+          {
+            echo "## FaselHD 1080p Max-Speed — مقارنة الطرق"
+            echo ""
+            echo "| الطريقة | النوع | النتيجة |"
+            echo "|---|---|---|"
+            echo "| Node sequential | اتصال واحد | انظر اللوج |"
+            echo "| Node parallel x${{ inputs.threads }} | متوازي | انظر اللوج |"
+            echo "| N_m3u8DL-RE x${{ inputs.threads }} | متوازي (الأسرع) | ${{ steps.nm3u8dlre.outputs.mbps }} Mbps في ${{ steps.nm3u8dlre.outputs.dt }}s |"
+            echo "| ffmpeg | تسلسلي (baseline) | ${{ steps.ffseq.outputs.mbps }} Mbps في ${{ steps.ffseq.outputs.dt }}s |"
+            echo ""
+            echo "Remux بأقل موارد: \`ffmpeg -i in.ts -c copy -bsf:a aac_adtstoasc -movflags +faststart out.mp4\` (بدون re-encode)"
+          } >> "$GITHUB_STEP_SUMMARY"
+          echo "::endgroup::"
+        env:
+          NM_MBPS: ${{ steps.nm3u8dlre.outputs.mbps }}
+          NM_DT: ${{ steps.nm3u8dlre.outputs.dt }}
+          FF_MBPS: ${{ steps.ffseq.outputs.mbps }}
+          FF_DT: ${{ steps.ffseq.outputs.dt }}
+
+      - name: Upload results artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: faselhd-speed-results
+          path: |
+            speed-results/
+            extract.log
+            master.m3u8
+            p1080.m3u8
+            node-test.log
+            nm3u8dlre.log
+            ffmpeg-seq.log
+          if-no-files-found: warn
+          retention-days: 7
