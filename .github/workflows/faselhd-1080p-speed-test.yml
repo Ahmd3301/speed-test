@@ -4,11 +4,13 @@ name: FaselHD 1080p Max-Speed Test
 # داخل GitHub-hosted runner (ubuntu-latest = 4 vCPU / 16GB RAM / VM جديدة لكل run)
 # المرجع: https://docs.github.com/en/actions/reference/runners/github-hosted-runners
 #
+# سياسة عدم التخزين: الفيديو يُحمَّل للقياس فقط ثم يُحذف قبل نهاية الـ job.
+# الـ artifact يحتوي لوجات ونتائج نصية فقط (بدون أي MP4).
+#
 # التشغيل عبر gh:
-#   gh workflow run "FaselHD 1080p Max-Speed Test" --ref main
-#   gh run list --workflow faselhd-1080p-speed-test.yml
-#   gh run watch <run-id>
-#   gh run download <run-id> -n faselhd-speed-results
+#   gh workflow run "FaselHD 1080p Max-Speed Test" --ref main --repo Ahmd3301/speed-test -f page_url="https://www.fasel-hd.co/?p=228502"
+#   gh run watch <run-id> --repo Ahmd3301/speed-test
+#   gh run download <run-id> -n faselhd-speed-results --repo Ahmd3301/speed-test -D ./run-results
 
 on:
   workflow_dispatch:
@@ -16,7 +18,7 @@ on:
       page_url:
         description: 'Fasel-HD episode page URL'
         required: false
-        default: 'https://www.fasel-hd.co/?p=271259'
+        default: 'https://www.fasel-hd.co/?p=228502'
         type: string
       threads:
         description: 'Parallel download threads'
@@ -29,7 +31,7 @@ on:
         default: '30'
         type: string
       full_download:
-        description: 'Download full 1080p + remux to MP4'
+        description: 'Download full 1080p + remux to MP4 (measured, then deleted)'
         required: false
         default: true
         type: boolean
@@ -50,55 +52,70 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Setup Node.js 20
+      - name: Setup Node.js 22
         uses: actions/setup-node@v4
         with:
-          node-version: '20'
+          node-version: '22'
 
       - name: Runner hardware info (prove 4-core container)
         run: |
-          echo "::group::Runner hardware (4 vCPU / 16GB per docs)"
           echo "DOC_REF=https://docs.github.com/en/actions/reference/runners/github-hosted-runners"
           uname -a
           lscpu | grep -E "Model name|Socket|Core\(|Thread\(|CPU\(s\)" || true
           echo "TOTAL_CPUS=$(nproc)"
           free -h
           df -h / | head -5
-          echo "::endgroup::"
 
-      - name: Install ffmpeg + yt-dlp + aria2
-        run: |
-          echo "::group::Install tools"
-          sudo apt-get update -qq
-          sudo apt-get install -y -qq ffmpeg aria2 curl jq
-          ffmpeg -version | head -2
-          aria2c --version | head -1
-          python3 -m pip install -q --upgrade yt-dlp
-          yt-dlp --version
-          echo "::endgroup::"
+      # ---- تخزين الأدوات: actions/cache يحفظ مجلد ~/tools بين التشغيلات ----
+      # أول تشغيل بعد هذا التعديل = cache-miss (تحميل مرة واحدة)، بعده = hit (استعادة بثوانٍ).
+      # المرجع: https://docs.github.com/en/actions/reference/workflows-and-actions/dependency-caching
+      - name: Restore tools cache (N_m3u8DL-RE)
+        id: tools-cache
+        uses: actions/cache@v4
+        with:
+          path: ~/tools
+          key: Linux-tools-nm3u8dlre-v1
+          restore-keys: |
+            Linux-tools-
 
-      - name: Install N_m3u8DL-RE (latest, fastest HLS downloader)
+      - name: Setup tools (preinstalled -> cached -> download)
         run: |
-          echo "::group::Install N_m3u8DL-RE"
-          # أسرع أداة HLS حسب البنشماركات: تحميل متوازي + اختيار تلقائي لأعلى جودة
-          # https://github.com/nilaoda/N_m3u8DL-RE
-          TAG=$(curl -sL https://api.github.com/repos/nilaoda/N_m3u8DL-RE/releases/latest | jq -r .tag_name)
-          echo "NM3U8DLRE_TAG=$TAG"
-          ASSET=$(curl -sL https://api.github.com/repos/nilaoda/N_m3u8DL-RE/releases/latest \
-            | jq -r '.assets[] | select(.name | test("linux-x64.*\\.tar\\.gz$")) | .browser_download_url' | head -1)
-          echo "NM3U8DLRE_ASSET=$ASSET"
-          [ -n "$ASSET" ] || { echo "No linux-x64 asset found"; exit 1; }
-          curl -sL -o /tmp/nm3u8dlre.tar.gz "$ASSET"
-          mkdir -p "$HOME/nm3u8dlre" && tar xzf /tmp/nm3u8dlre.tar.gz -C "$HOME/nm3u8dlre"
-          chmod +x "$HOME/nm3u8dlre/N_m3u8DL-RE"
-          "$HOME/nm3u8dlre/N_m3u8DL-RE" --help | head -5
-          echo "$HOME/nm3u8dlre" >> "$GITHUB_PATH"
-          echo "::endgroup::"
+          T0=$(date +%s.%N)
+          mkdir -p ~/tools
+          # 1) ffmpeg: مدمج غالباً في صورة الـ Runner -> فحص فوري (أقل من ثانية)
+          if command -v ffmpeg >/dev/null 2>&1 && command -v ffprobe >/dev/null 2>&1; then
+            FFMPEG_SRC="preinstalled($(ffmpeg -version | head -1 | grep -oP 'version \K[0-9.]+' || echo ok))"
+          else
+            sudo apt-get update -qq && sudo apt-get install -y -qq ffmpeg
+            FFMPEG_SRC="apt-installed"
+          fi
+          # 2) N_m3u8DL-RE: من الكاش إن وُجد ويعمل، وإلا تحميل مرة واحدة ثم يُحفظ تلقائياً
+          if [ -x "$HOME/tools/N_m3u8DL-RE" ] && "$HOME/tools/N_m3u8DL-RE" --help >/dev/null 2>&1; then
+            NM_SRC="cache-hit"
+          else
+            ASSET=$(curl -sL https://api.github.com/repos/nilaoda/N_m3u8DL-RE/releases/latest \
+              | jq -r '.assets[] | select(.name | test("linux-x64.*\\.tar\\.gz$")) | .browser_download_url' | head -1)
+            curl -sL -o /tmp/nm3u8dlre.tar.gz "$ASSET"
+            tar xzf /tmp/nm3u8dlre.tar.gz -C "$HOME/tools" && chmod +x "$HOME/tools/N_m3u8DL-RE"
+            NM_SRC="downloaded-on-miss"
+          fi
+          echo "$HOME/tools" >> "$GITHUB_PATH"
+          T1=$(date +%s.%N)
+          DT=$(echo "$T1 - $T0" | bc)
+          echo "TOOLS_SETUP_SECONDS=$DT (cache-hit=${{ steps.tools-cache.outputs.cache-hit }})"
+          echo "TOOLS_FFMPEG_SRC=$FFMPEG_SRC"
+          echo "TOOLS_NM3U8DLRE_SRC=$NM_SRC"
+          N_m3u8DL-RE --help 2>/dev/null | head -2 || "$HOME/tools/N_m3u8DL-RE" --help | head -2
+
+      # ---- مراقبة الموارد: عيّنات كل ثانية (CPU/RAM/شبكة) أثناء مرحلة التحميل ----
+      - name: Start resource monitor (DOWNLOAD phase)
+        run: |
+          python3 scripts/monitor.py --out /tmp/mon_download.csv & echo $! > /tmp/mon.pid
+          echo "monitor pid=$(cat /tmp/mon.pid)"
 
       - name: Extract master link (exFaselHD1234.js)
         id: extract
         run: |
-          echo "::group::Extract master"
           node exFaselHD1234.js "${{ inputs.page_url }}" | tee extract.log
           MASTER=$(grep -oP '^Link:\s*\Khttps?://\S+' extract.log | head -1)
           if [ -z "$MASTER" ]; then echo "FAILED to extract master"; cat extract.log; exit 1; fi
@@ -106,12 +123,10 @@ jobs:
           echo "master_url=$MASTER" >> "$GITHUB_OUTPUT"
           curl -sL -A "$UA" "$MASTER" -o master.m3u8
           echo "--- master.m3u8 ---"; cat master.m3u8
-          echo "::endgroup::"
 
       - name: Select 1080p variant playlist
         id: variant
         run: |
-          echo "::group::Select 1080p"
           python3 - <<'PY'
           import os, re, urllib.parse
           master = open('master.m3u8').read()
@@ -134,26 +149,22 @@ jobs:
           PY
           echo "P1080_URL=$(cat p1080.url)"
           curl -sL -A "$UA" "$(cat p1080.url)" -o p1080.m3u8
-          echo "segments=$(grep -c '\.ts' p1080.m3u8 || true) duration=$(grep -oP '#EXTINF:\K[0-9.]+' p1080.m3u8 | awk '{s+=$1} END {print s}')s encrypted=$(grep -c '#EXT-X-KEY' p1080.m3u8 || true)"
-          echo "::endgroup::"
+          echo "segments=$(grep -c '\.ts' p1080.m3u8 || true) encrypted=$(grep -c '#EXT-X-KEY' p1080.m3u8 || true)"
         env:
           MASTER_URL: ${{ steps.extract.outputs.master_url }}
 
       - name: 'Method 1+2: Node seq vs parallel (same sample)'
         run: |
-          echo "::group::Node seq vs parallel"
           node scripts/faselhd-speed-test.mjs \
             --master "${{ steps.extract.outputs.master_url }}" \
             --threads "${{ inputs.threads }}" \
             --sample "${{ inputs.sample_segments }}" \
             --out ./speed-results | tee node-test.log
-          echo "::endgroup::"
 
       - name: 'Method 3: N_m3u8DL-RE full 1080p (parallel best)'
         id: nm3u8dlre
         if: inputs.full_download == true
         run: |
-          echo "::group::N_m3u8DL-RE parallel"
           mkdir -p dl-nm3u8dlre
           T0=$(date +%s.%N)
           N_m3u8DL-RE "${{ steps.extract.outputs.master_url }}" \
@@ -172,13 +183,11 @@ jobs:
           echo "dt=$DT" >> "$GITHUB_OUTPUT"
           echo "size=$SZ" >> "$GITHUB_OUTPUT"
           echo "mbps=$MBPS" >> "$GITHUB_OUTPUT"
-          echo "::endgroup::"
 
       - name: 'Method 4: ffmpeg sequential baseline (1 connection)'
         id: ffseq
         if: inputs.full_download == true
         run: |
-          echo "::group::ffmpeg sequential"
           T0=$(date +%s.%N)
           # ffmpeg يحمّل HLS تسلسلياً (اتصال واحد + http_multiple=2 prefetch فقط)
           # المرجع: https://ffmpeg.org/pipermail/ffmpeg-user/2017-January/034980.html
@@ -186,7 +195,7 @@ jobs:
             -user_agent "$UA" -headers "Referer: https://www.fasel-hd.co/" \
             -i "$(cat p1080.url)" \
             -c copy -bsf:a aac_adtstoasc -movflags +faststart \
-            ffmpeg_1080p.mp4 2>&1 | tee ffmpeg-seq.log | tail -5
+            ffmpeg_1080p.mp4 2>&1 | tee ffmpeg-seq.log | tail -3
           T1=$(date +%s.%N)
           DT=$(echo "$T1 - $T0" | bc)
           SZ=$(stat -c%s ffmpeg_1080p.mp4 2>/dev/null || echo 0)
@@ -195,16 +204,29 @@ jobs:
           echo "dt=$DT" >> "$GITHUB_OUTPUT"
           echo "size=$SZ" >> "$GITHUB_OUTPUT"
           echo "mbps=$MBPS" >> "$GITHUB_OUTPUT"
-          echo "::endgroup::"
 
-      - name: 'Remux check: TS -> MP4 with minimal resources (-c copy)'
+      - name: Stop monitor + DOWNLOAD phase resource report
+        if: always()
+        run: |
+          kill $(cat /tmp/mon.pid) 2>/dev/null || true
+          sleep 2
+          python3 scripts/monitor.py --summarize /tmp/mon_download.csv --label DOWNLOAD | tee mon_download_report.txt
+
+      # ---- مرحلة التحويل: مراقبة مستقلة لعملية remux ----
+      - name: Start resource monitor (REMUX phase)
         if: inputs.full_download == true
         run: |
-          echo "::group::Remux check (no re-encode)"
+          python3 scripts/monitor.py --out /tmp/mon_remux.csv & echo $! > /tmp/mon_remux.pid
+          echo "monitor pid=$(cat /tmp/mon_remux.pid)"
+
+      - name: 'Remux check: TS -> MP4 with minimal resources (-c copy)'
+        id: remux
+        if: inputs.full_download == true
+        run: |
           # تحويل الحاوية فقط بدون معالجة: -c copy لا يلمس الكودك، CPU ~ صفر
           # + aac_adtstoasc ضروري لصوت AAC القادم من TS إلى MP4
           # + faststart ينقل moov للمقدمة للبث المباشر
-          ls -la ./dl-nm3u8dlre/ ffmpeg_1080p.mp4 2>/dev/null || true
+          T0=$(date +%s.%N)
           for F in ./dl-nm3u8dlre/* ffmpeg_1080p.mp4; do
             [ -f "$F" ] || continue
             echo "--- ffprobe: $F ---"
@@ -213,13 +235,20 @@ jobs:
           done
           /usr/bin/time -v ffmpeg -hide_banner -y -i ffmpeg_1080p.mp4 \
             -c copy -movflags +faststart remux_faststart.mp4 2>&1 | grep -E "Maximum resident|Elapsed|Percent of CPU" || true
+          T1=$(date +%s.%N)
+          echo "REMUX_WALL_SECONDS=$(echo "$T1 - $T0" | bc)"
           echo "REMUX_CMD=ffmpeg -i in.ts -c copy -bsf:a aac_adtstoasc -movflags +faststart out.mp4"
-          echo "::endgroup::"
+
+      - name: Stop monitor + REMUX phase resource report
+        if: always() && inputs.full_download == true
+        run: |
+          kill $(cat /tmp/mon_remux.pid) 2>/dev/null || true
+          sleep 2
+          python3 scripts/monitor.py --summarize /tmp/mon_remux.csv --label REMUX | tee mon_remux_report.txt
 
       - name: Final comparison table + verdict
         if: always()
         run: |
-          echo "::group::Comparison"
           python3 - <<'PY'
           import json, os
           node_res = {}
@@ -246,16 +275,26 @@ jobs:
             echo "| N_m3u8DL-RE x${{ inputs.threads }} | متوازي (الأسرع) | ${{ steps.nm3u8dlre.outputs.mbps }} Mbps في ${{ steps.nm3u8dlre.outputs.dt }}s |"
             echo "| ffmpeg | تسلسلي (baseline) | ${{ steps.ffseq.outputs.mbps }} Mbps في ${{ steps.ffseq.outputs.dt }}s |"
             echo ""
+            echo "تقارير الموارد: MON_DOWNLOAD_* (التحميل) و MON_REMUX_* (التحويل) في اللوج."
             echo "Remux بأقل موارد: \`ffmpeg -i in.ts -c copy -bsf:a aac_adtstoasc -movflags +faststart out.mp4\` (بدون re-encode)"
           } >> "$GITHUB_STEP_SUMMARY"
-          echo "::endgroup::"
         env:
           NM_MBPS: ${{ steps.nm3u8dlre.outputs.mbps }}
           NM_DT: ${{ steps.nm3u8dlre.outputs.dt }}
           FF_MBPS: ${{ steps.ffseq.outputs.mbps }}
           FF_DT: ${{ steps.ffseq.outputs.dt }}
 
-      - name: Upload results artifact
+      # سياسة عدم التخزين: حذف كل الفيديو قبل رفع الـ artifact
+      - name: Delete all video files (no-store policy)
+        if: always()
+        run: |
+          rm -f ffmpeg_1080p.mp4 remux_faststart.mp4
+          rm -rf ./dl-nm3u8dlre
+          rm -f ./speed-results/single_segment.bin
+          echo "Remaining files:"; ls -la
+          echo "No MP4/TS video is uploaded. Logs + JSON only."
+
+      - name: Upload results artifact (logs only, no video)
         if: always()
         uses: actions/upload-artifact@v4
         with:
@@ -268,5 +307,7 @@ jobs:
             node-test.log
             nm3u8dlre.log
             ffmpeg-seq.log
+            mon_download_report.txt
+            mon_remux_report.txt
           if-no-files-found: warn
           retention-days: 7
