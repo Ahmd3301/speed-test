@@ -30,6 +30,11 @@ on:
         required: false
         default: '16'
         type: string
+      master_url:
+        description: 'Optional: ready master.m3u8 URL (skips page extraction if Cloudflare blocks the runner)'
+        required: false
+        default: ''
+        type: string
 
 permissions:
   contents: read
@@ -103,7 +108,9 @@ jobs:
         id: dl
         run: |
           # Cloudflare قد تتحدى IP الـ Runner ("Just a moment...") — نعيد المحاولة
-          MASTER=""
+          # أو نستخدم master_url جاهزاً إن مُرّر (يتجاوز صفحة الموقع المحجوبة)
+          MASTER="${{ inputs.master_url }}"
+          if [ -z "$MASTER" ]; then
           for attempt in 1 2 3 4 5; do
             node exFaselHD1234.js "${{ inputs.page_url }}" | tee extract.log
             MASTER=$(grep -oP '^Link:\s*\Khttps?://\S+' extract.log | head -1)
@@ -111,6 +118,7 @@ jobs:
             echo "EXTRACT attempt $attempt blocked (likely Cloudflare challenge), waiting 30s…"
             sleep 30
           done
+          else echo "USING provided master_url (extraction skipped)"; fi
           [ -n "$MASTER" ] || { echo "FAILED to extract master after 5 attempts"; exit 1; }
           python3 scripts/monitor.py --out /tmp/mon_dl.csv & echo $! > /tmp/mon.pid
           START_UTC=$(date -u +%FT%TZ); T0=$(date +%s.%N)
