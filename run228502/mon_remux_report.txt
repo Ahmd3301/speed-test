@@ -1,0 +1,5 @@
+{"label": "REMUX", "duration_s": 23.0, "duration_min": 0.38, "cpu_avg_pct": 22.5, "cpu_max_pct": 40.9, "ram_avg_mb": 1086, "ram_max_mb": 1133, "ram_total_mb": 15990, "net_rx_avg_mbps": 0.0, "net_rx_max_mbps": 0.0, "net_rx_total_mb": 0.0, "net_tx_avg_mbps": 0.02, "samples": 23, "iface": "enP7204s1"}
+MON_REMUX_DURATION_MIN=0.38 (23s, 23 samples)
+MON_REMUX_CPU_AVG=22.5% MAX=40.9%
+MON_REMUX_RAM_AVG=1086MB MAX=1133MB / 15990MB
+MON_REMUX_NET_RX_AVG=0.0Mbps MAX=0.0Mbps TOTAL=0.0MB

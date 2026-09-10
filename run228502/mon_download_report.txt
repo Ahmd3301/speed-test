@@ -1,0 +1,5 @@
+{"label": "DOWNLOAD", "duration_s": 1469.7, "duration_min": 24.5, "cpu_avg_pct": 2.1, "cpu_max_pct": 50.0, "ram_avg_mb": 1066, "ram_max_mb": 1838, "ram_total_mb": 15990, "net_rx_avg_mbps": 36.5, "net_rx_max_mbps": 317.3, "net_rx_total_mb": 6695.7, "net_tx_avg_mbps": 0.2, "samples": 1469, "iface": "enP7204s1"}
+MON_DOWNLOAD_DURATION_MIN=24.5 (1470s, 1469 samples)
+MON_DOWNLOAD_CPU_AVG=2.1% MAX=50.0%
+MON_DOWNLOAD_RAM_AVG=1066MB MAX=1838MB / 15990MB
+MON_DOWNLOAD_NET_RX_AVG=36.5Mbps MAX=317.3Mbps TOTAL=6695.7MB

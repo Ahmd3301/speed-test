@@ -67,14 +67,16 @@ jobs:
           df -h / | head -5
 
       # ---- تخزين الأدوات: actions/cache يحفظ مجلد ~/tools بين التشغيلات ----
-      # أول تشغيل بعد هذا التعديل = cache-miss (تحميل مرة واحدة)، بعده = hit (استعادة بثوانٍ).
+      # أول تشغيل بمفتاح جديد = cache-miss (تحميل مرة واحدة)، بعده = hit (استعادة بثوانٍ).
+      # ffmpeg غير مثبت مسبقاً على الصورة (ثبت عبر apt في تجربة سابقة) لذلك نُخزّن نسخة
+      # static منه في نفس الكاش لتفادي apt تماماً عند الـ hit.
       # المرجع: https://docs.github.com/en/actions/reference/workflows-and-actions/dependency-caching
-      - name: Restore tools cache (N_m3u8DL-RE)
+      - name: Restore tools cache (N_m3u8DL-RE + ffmpeg static)
         id: tools-cache
         uses: actions/cache@v4
         with:
           path: ~/tools
-          key: Linux-tools-nm3u8dlre-v1
+          key: Linux-tools-nm3u8dlre-ffmpegstatic-v2
           restore-keys: |
             Linux-tools-
 
@@ -82,14 +84,7 @@ jobs:
         run: |
           T0=$(date +%s.%N)
           mkdir -p ~/tools
-          # 1) ffmpeg: مدمج غالباً في صورة الـ Runner -> فحص فوري (أقل من ثانية)
-          if command -v ffmpeg >/dev/null 2>&1 && command -v ffprobe >/dev/null 2>&1; then
-            FFMPEG_SRC="preinstalled($(ffmpeg -version | head -1 | grep -oP 'version \K[0-9.]+' || echo ok))"
-          else
-            sudo apt-get update -qq && sudo apt-get install -y -qq ffmpeg
-            FFMPEG_SRC="apt-installed"
-          fi
-          # 2) N_m3u8DL-RE: من الكاش إن وُجد ويعمل، وإلا تحميل مرة واحدة ثم يُحفظ تلقائياً
+          # 1) N_m3u8DL-RE: من الكاش إن وُجد ويعمل، وإلا تحميل مرة واحدة ثم يُحفظ تلقائياً
           if [ -x "$HOME/tools/N_m3u8DL-RE" ] && "$HOME/tools/N_m3u8DL-RE" --help >/dev/null 2>&1; then
             NM_SRC="cache-hit"
           else
@@ -99,13 +94,27 @@ jobs:
             tar xzf /tmp/nm3u8dlre.tar.gz -C "$HOME/tools" && chmod +x "$HOME/tools/N_m3u8DL-RE"
             NM_SRC="downloaded-on-miss"
           fi
+          # 2) ffmpeg/ffprobe: نسخة static مخزّنة أولاً (تتفادى apt)، ثم المثبت مسبقاً، ثم apt كحل أخير
+          if [ -x "$HOME/tools/ffmpeg" ] && [ -x "$HOME/tools/ffprobe" ] && "$HOME/tools/ffmpeg" -version >/dev/null 2>&1; then
+            FFMPEG_SRC="cache-hit(static)"
+          elif command -v ffmpeg >/dev/null 2>&1 && command -v ffprobe >/dev/null 2>&1; then
+            FFMPEG_SRC="preinstalled($(ffmpeg -version | head -1 | grep -oP 'version \K[0-9.]+' || echo ok))"
+          else
+            curl -sL -o /tmp/ffmpeg-static.tar.xz "https://johnvansickle.com/ffmpeg/releases/ffmpeg-release-amd64-static.tar.xz"
+            tar xJf /tmp/ffmpeg-static.tar.xz -C /tmp
+            cp /tmp/ffmpeg-*-amd64-static/ffmpeg /tmp/ffmpeg-*-amd64-static/ffprobe "$HOME/tools/"
+            chmod +x "$HOME/tools/ffmpeg" "$HOME/tools/ffprobe"
+            FFMPEG_SRC="static-downloaded-on-miss"
+          fi
           echo "$HOME/tools" >> "$GITHUB_PATH"
+          export PATH="$HOME/tools:$PATH"
           T1=$(date +%s.%N)
           DT=$(echo "$T1 - $T0" | bc)
           echo "TOOLS_SETUP_SECONDS=$DT (cache-hit=${{ steps.tools-cache.outputs.cache-hit }})"
           echo "TOOLS_FFMPEG_SRC=$FFMPEG_SRC"
           echo "TOOLS_NM3U8DLRE_SRC=$NM_SRC"
-          N_m3u8DL-RE --help 2>/dev/null | head -2 || "$HOME/tools/N_m3u8DL-RE" --help | head -2
+          which ffmpeg ffprobe N_m3u8DL-RE || true
+          ffmpeg -version 2>/dev/null | head -1 || "$HOME/tools/ffmpeg" -version | head -1
 
       # ---- مراقبة الموارد: عيّنات كل ثانية (CPU/RAM/شبكة) أثناء مرحلة التحميل ----
       - name: Start resource monitor (DOWNLOAD phase)
@@ -156,6 +165,7 @@ jobs:
       - name: 'Method 1+2: Node seq vs parallel (same sample)'
         run: |
           node scripts/faselhd-speed-test.mjs \
+            --url "${{ inputs.page_url }}" \
             --master "${{ steps.extract.outputs.master_url }}" \
             --threads "${{ inputs.threads }}" \
             --sample "${{ inputs.sample_segments }}" \
