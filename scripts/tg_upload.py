@@ -79,7 +79,7 @@ class StreamingMultipart:
                 f'Content-Type: video/mp4\r\n\r\n').encode()
         self.pre = pre
         self.post = ('\r\n--' + self.boundary + '--\r\n').encode()
-        self.total = len(pre) + self.file_size + len(post)
+        self.total = len(pre) + self.file_size + len(self.post)
 
     def body_iter(self):
         yield self.pre
