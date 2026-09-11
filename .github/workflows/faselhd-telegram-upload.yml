@@ -126,6 +126,7 @@ jobs:
           echo "dl_start_utc=$START_UTC" >> "$GITHUB_OUTPUT"
           mkdir -p dl
           # تقدير الحجم الكلي: متوسط Content-Length لعينة 5 مقاطع × عدد المقاطع
+          # (يدعم رابط Master أو بلايلست media مباشرة)
           EXPECTED=$(MASTER_URL="$MASTER" UA="$UA" python3 - <<'PY' 2>/dev/null || echo 0
           import os, re, urllib.parse, urllib.request
           def get(url, head=False):
@@ -133,16 +134,19 @@ jobs:
               with urllib.request.urlopen(q, timeout=30) as r:
                   return (r.headers if head else r.read().decode('utf8', 'replace')), (r.headers if not head else None)
           try:
-              master, _ = get(os.environ['MASTER_URL'])
-              base = os.environ['MASTER_URL']
-              vs = []
-              for m in re.finditer(r'#EXT-X-STREAM-INF:([^\n]+)\n([^\n]+)', master):
-                  a, u = m.group(1), m.group(2).strip()
-                  bw = int(re.search(r'BANDWIDTH=(\d+)', a).group(1))
-                  r = re.search(r'RESOLUTION=(\d+x\d+)', a).group(1)
-                  vs.append((bw, r, urllib.parse.urljoin(base, u)))
-              vs.sort(reverse=True)
-              purl = next((v for v in vs if v[1] == '1920x1080'), vs[0])[2]
+              link, _ = get(os.environ['MASTER_URL'])
+              if '#EXT-X-STREAM-INF' in link:
+                  base = os.environ['MASTER_URL']
+                  vs = []
+                  for m in re.finditer(r'#EXT-X-STREAM-INF:([^\n]+)\n([^\n]+)', link):
+                      a, u = m.group(1), m.group(2).strip()
+                      bw = int(re.search(r'BANDWIDTH=(\d+)', a).group(1))
+                      r = re.search(r'RESOLUTION=(\d+x\d+)', a).group(1)
+                      vs.append((bw, r, urllib.parse.urljoin(base, u)))
+                  vs.sort(reverse=True)
+                  purl = next((v for v in vs if v[1] == '1920x1080'), vs[0])[2]
+              else:
+                  purl = os.environ['MASTER_URL']
               pl, _ = get(purl)
               segs = [ln.strip() for ln in pl.split('\n') if ln.strip() and not ln.strip().startswith('#')]
               segs = [urllib.parse.urljoin(purl, s) for s in segs]

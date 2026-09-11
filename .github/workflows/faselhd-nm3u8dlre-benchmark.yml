@@ -97,15 +97,18 @@ jobs:
           import os, re, urllib.parse
           master = open('master.m3u8').read()
           base = os.environ['MASTER_URL']
-          variants = []
-          for m in re.finditer(r'#EXT-X-STREAM-INF:([^\n]+)\n([^\n]+)', master):
-              attrs, uri = m.group(1), m.group(2).strip()
-              bw = int(re.search(r'BANDWIDTH=(\d+)', attrs).group(1)) if 'BANDWIDTH' in attrs else 0
-              res = (re.search(r'RESOLUTION=(\d+x\d+)', attrs).group(1) if 'RESOLUTION' in attrs else 'unknown')
-              variants.append((bw, res, urllib.parse.urljoin(base, uri)))
-          variants.sort(reverse=True)
-          best = next((v for v in variants if v[1] == '1920x1080'), variants[0])
-          print(best[2])
+          if '#EXT-X-STREAM-INF' not in master:
+              print(base)  # بلايلست media مباشرة — استخدمها كما هي
+          else:
+              variants = []
+              for m in re.finditer(r'#EXT-X-STREAM-INF:([^\n]+)\n([^\n]+)', master):
+                  attrs, uri = m.group(1), m.group(2).strip()
+                  bw = int(re.search(r'BANDWIDTH=(\d+)', attrs).group(1)) if 'BANDWIDTH' in attrs else 0
+                  res = (re.search(r'RESOLUTION=(\d+x\d+)', attrs).group(1) if 'RESOLUTION' in attrs else 'unknown')
+                  variants.append((bw, res, urllib.parse.urljoin(base, uri)))
+              variants.sort(reverse=True)
+              best = next((v for v in variants if v[1] == '1920x1080'), variants[0])
+              print(best[2])
           PY
           )
           curl -sL -A "$UA" "$P1080_URL" -o p1080.m3u8

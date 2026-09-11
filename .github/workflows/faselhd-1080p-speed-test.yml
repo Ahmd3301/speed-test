@@ -151,10 +151,15 @@ jobs:
           variants.sort(reverse=True)
           for bw, res, uri in variants:
               print(f"VARIANT res={res} bw={bw} uri={uri[:100]}...")
-          best = next((v for v in variants if v[1] == '1920x1080'), variants[0])
-          print(f"SELECTED_1080P res={best[1]} bw={best[0]}")
-          open(os.environ['GITHUB_OUTPUT'], 'a').write(f"p1080_url={best[2]}\n")
-          open('p1080.url', 'w').write(best[2])
+          if variants:
+              best = next((v for v in variants if v[1] == '1920x1080'), variants[0])
+              print(f"SELECTED_1080P res={best[1]} bw={best[0]}")
+              purl = best[2]
+          else:
+              print("SELECTED_1080P direct media playlist (no master)")
+              purl = base
+          open(os.environ['GITHUB_OUTPUT'], 'a').write(f"p1080_url={purl}\n")
+          open('p1080.url', 'w').write(purl)
           PY
           echo "P1080_URL=$(cat p1080.url)"
           curl -sL -A "$UA" "$(cat p1080.url)" -o p1080.m3u8

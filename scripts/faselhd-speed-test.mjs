@@ -140,13 +140,23 @@ async function main() {
   }
   console.log(`      Master: ${masterUrl.slice(0, 110)}…`);
 
-  console.log('[2/6] Fetch master playlist + select 1080p …');
-  const masterText = await fetchText(masterUrl);
-  const variants = parseMaster(masterText, masterUrl);
-  if (!variants.length) throw new Error('No variants in master.m3u8');
-  console.log('      Variants:');
-  variants.forEach(v => console.log(`        - ${v.resolution} bw=${v.bandwidth} :: ${v.uri.slice(0, 90)}…`));
-  const v1080 = variants.find(v => v.resolution === '1920x1080') || variants[0];
+  console.log('[2/6] Fetch link + select 1080p (master or direct media) …');
+  const linkText = await fetchText(masterUrl);
+  let variants = parseMaster(linkText, masterUrl);
+  let v1080;
+  if (variants.length) {
+    console.log('      Link is MASTER playlist:');
+    variants.forEach(v => console.log(`        - ${v.resolution} bw=${v.bandwidth} :: ${v.uri.slice(0, 90)}…`));
+    v1080 = variants.find(v => v.resolution === '1920x1080') || variants[0];
+  } else {
+    // الرابط بلايلست media مباشرة (بدون Master) — استخدمها كما هي
+    const guess = /hd(\d{3,4})b|[^0-9](\d{3,4})p|sd(\d{3})b/i.exec(masterUrl);
+    const q = guess ? (guess[1] || guess[2] || guess[3]) : null;
+    const resMap = { '1080': '1920x1080', '720': '1280x720', '360': '640x360' };
+    v1080 = { bandwidth: 0, resolution: resMap[q] || 'direct', uri: masterUrl };
+    variants = [{ ...v1080 }];
+    console.log(`      Link is DIRECT media playlist (no master), guessed ${v1080.resolution}`);
+  }
   console.log(`      Selected 1080p: ${v1080.resolution} bw=${v1080.bandwidth}`);
 
   console.log('[3/6] Fetch 1080p media playlist …');

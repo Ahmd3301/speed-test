@@ -117,24 +117,26 @@ function parseSeasonList(html) {
 
 function decodeM3u8(playerHtml, playerUrl) {
   const scriptRx = /<script[^>]*>([\s\S]*?)<\/script>/g;
-  let decoder = null;
+  const candidates = [];
   let sm;
   while ((sm = scriptRx.exec(playerHtml)) !== null) {
     const s = sm[1];
-    if (s.length > 5000 && !s.includes('ChmaorrCfoz') && (s.includes('!![]') || s.includes('function _0x'))) {
-      decoder = s;
-      break;
-    }
+    // أي سكربت inline كبير قد يبني رابط الـ m3u8 (المشغّل الجديد يوزعه على سكربتين)
+    if (s.length > 2000) candidates.push(s);
   }
-  if (!decoder) return null;
+  if (candidates.length === 0) return null;
 
   let captured = '';
+  const HlsCls = function () {};
+  HlsCls.prototype.loadSource = function (url) { captured += 'loadSource("' + url + '")'; };
+  HlsCls.prototype.attachMedia = function () {};
+  HlsCls.isSupported = () => true;
   const sandbox = {
     document: {
       write: (...args) => { captured += args.join(''); },
       writeln: (...args) => { captured += args.join('') + '\n'; },
-      getElementById: (id) => id === 'video' ? { canPlayType: () => '', set src(v) { captured += '<video src="' + v + '">'; }, get src() { return ''; } } : null,
-      createElement: (tag) => tag === 'video' ? { canPlayType: () => '', set src(v) { captured += '<video src="' + v + '">'; }, get src() { return ''; } } : { setAttribute: () => {}, appendChild: () => {}, addEventListener: () => {}, get src() { return ''; }, set src(v) { captured += '<e src="' + v + '">'; } },
+      getElementById: (id) => id === 'video' ? { canPlayType: () => 'maybe', set src(v) { captured += '<video src="' + v + '">'; }, get src() { return ''; } } : null,
+      createElement: (tag) => tag === 'video' ? { canPlayType: () => 'maybe', set src(v) { captured += '<video src="' + v + '">'; }, get src() { return ''; } } : { setAttribute: () => {}, appendChild: () => {}, addEventListener: () => {}, get src() { return ''; }, set src(v) { captured += '<e src="' + v + '">'; } },
       createTextNode: () => ({}),
       querySelectorAll: () => [],
       querySelector: () => null,
@@ -146,7 +148,7 @@ function decodeM3u8(playerHtml, playerUrl) {
       addEventListener: () => {},
       setTimeout: (fn) => { try { fn(); } catch(e) {} },
       setInterval: () => ({}),
-      Hls: { isSupported: () => false, Events: {} },
+      Hls: HlsCls,
       navigator: { userAgent: UA },
       console: { log: () => {}, error: () => {}, warn: () => {} },
       atob: (s) => Buffer.from(s, 'base64').toString('binary'),
@@ -154,12 +156,16 @@ function decodeM3u8(playerHtml, playerUrl) {
     },
     location: { href: playerUrl, hostname: new URL(playerUrl).hostname, search: '' },
     navigator: { userAgent: UA },
+    Hls: HlsCls,
     setTimeout: (fn) => { try { fn(); } catch(e) {} },
     console: { log: () => {}, error: () => {}, warn: () => {} },
   };
 
   try {
-    vm.runInContext(decoder, vm.createContext(sandbox), { timeout: 5000 });
+    const ctx = vm.createContext(sandbox);
+    for (const code of candidates) {
+      try { vm.runInContext(code, ctx, { timeout: 5000 }); } catch (e) {}
+    }
   } catch (e) {}
 
   const urls = [];
@@ -170,7 +176,26 @@ function decodeM3u8(playerHtml, playerUrl) {
   while ((m = rx.exec(captured)) !== null) urls.push(m[1]);
   rx = /loadSource\s*\(\s*['"]([^'"]*\.m3u8[^'"]*)['"]/gi;
   while ((m = rx.exec(captured)) !== null) urls.push(m[1]);
-  return [...new Set(urls)];
+  rx = /\bsrc\s*=\s*"([^"]*\.m3u8[^"]*)"/gi;
+  while ((m = rx.exec(captured)) !== null) urls.push(m[1]);
+  const uniq = [...new Set(urls)];
+  // فضّل master.m3u8 عند وجوده (يحمل كل الجودات)، وإلا اترك المباشرة كما هي
+  uniq.sort((a, b) => ((b.includes('master.m3u8') ? 1 : 0) - (a.includes('master.m3u8') ? 1 : 0)));
+  return uniq;
+}
+
+// يجرب كل روابط المشغّل بالترتيب حتى أول رابط m3u8 صالح
+// (الموقع يعرض عدة سيرفرات وقد يكون أولها ميتاً: Token Expired!)
+async function tryPlayers(playerUrls) {
+  for (const pu of playerUrls) {
+    try {
+      const playerHtml = await fetchUrl(pu);
+      if (!playerHtml || playerHtml.length < 500) continue;
+      const urls = decodeM3u8(playerHtml, pu);
+      if (urls && urls.length > 0) return urls[0];
+    } catch (e) {}
+  }
+  return null;
 }
 
 async function resolveEpisode(epUrl) {
@@ -178,9 +203,7 @@ async function resolveEpisode(epUrl) {
     const html = await fetchUrl(epUrl);
     const playerUrls = parsePlayerUrls(html);
     if (playerUrls.length === 0) return null;
-    const playerHtml = await fetchUrl(playerUrls[0]);
-    const urls = decodeM3u8(playerHtml, playerUrls[0]);
-    return (urls && urls.length > 0) ? urls[0] : null;
+    return await tryPlayers(playerUrls);
   } catch (e) { return null; }
 }
 
@@ -220,15 +243,13 @@ async function showUrls(label, epUrl) {
       process.exit(1);
     }
 
-    const firstPlayerUrl = playerUrls[0];
-    const playerHtml = await fetchUrl(firstPlayerUrl);
-    const m3u8Urls = decodeM3u8(playerHtml, firstPlayerUrl);
+    const m3u8Link = await tryPlayers(playerUrls);
 
     console.log('Name: ' + name);
     if (episode) console.log('Episode: ' + episode);
 
-    if (m3u8Urls && m3u8Urls.length > 0) {
-      console.log('Link: ' + m3u8Urls[0]);
+    if (m3u8Link) {
+      console.log('Link: ' + m3u8Link);
     } else {
       console.log('Link: ERROR (no m3u8 found)');
     }
@@ -340,11 +361,9 @@ async function showUrls(label, epUrl) {
     }
 
   } else {
-    const firstUrl = playerUrls.length > 0 ? playerUrls[0] : url;
-    const playerHtml = await fetchUrl(firstUrl);
-    const urls = decodeM3u8(playerHtml, firstUrl);
+    const link = playerUrls.length > 0 ? await tryPlayers(playerUrls) : null;
     console.log('Link:');
-    console.log((urls && urls.length > 0) ? urls[0] : 'ERROR');
+    console.log(link || 'ERROR');
   }
   } catch (e) {
     console.error('Error: ' + e.message);
