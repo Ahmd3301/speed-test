@@ -177,13 +177,34 @@ def split_mp4(path, out_dir, part_max=PART_MAX):
 
 # ---------- رفع streaming ----------
 
+def make_thumb(src, out_dir):
+    """ضغط صورة الغلاف إلى JPEG صغير (<200KB شرط تليجرام) وإرجاع مساره أو None."""
+    try:
+        out = os.path.join(out_dir, 'thumb_small.jpg')
+        for w, q in ((320, 6), (256, 8), (192, 10)):
+            r = subprocess.run(
+                ['ffmpeg', '-hide_banner', '-loglevel', 'error', '-y', '-i', src,
+                 '-vframes', '1', '-vf', f'scale={w}:-1', '-q:v', str(q), out],
+                capture_output=True, text=True, timeout=120)
+            if r.returncode == 0 and os.path.exists(out) and os.path.getsize(out) <= 200 * 1024:
+                return out
+        return out if os.path.exists(out) and os.path.getsize(out) <= 200 * 1024 else None
+    except Exception:
+        return None
+
+
 class StreamingMultipart:
-    def __init__(self, fields, file_field, file_path, file_name):
+    def __init__(self, fields, file_field, file_path, file_name, thumb_path=None):
         self.boundary = '----tgup' + hashlib.md5(os.urandom(16)).hexdigest()
         self.fields = fields
         self.file_field = file_field
         self.file_path = file_path
         self.file_name = file_name
+        self.thumb_path = thumb_path
+        self.thumb_bytes = b''
+        if thumb_path and os.path.exists(thumb_path):
+            with open(thumb_path, 'rb') as f:
+                self.thumb_bytes = f.read()
         self.file_size = os.path.getsize(file_path)
         pre = b''
         for k, v in fields.items():
@@ -196,7 +217,14 @@ class StreamingMultipart:
                 f'Content-Type: video/mp4\r\n\r\n').encode()
         self.pre = pre
         self.post = ('\r\n--' + self.boundary + '--\r\n').encode()
-        self.total = len(pre) + self.file_size + len(self.post)
+        thumb_part = b''
+        if self.thumb_bytes:
+            thumb_part = ('--' + self.boundary + '\r\n').encode()
+            thumb_part += ('Content-Disposition: form-data; name="thumbnail"; '
+                           'filename="thumb.jpg"\r\nContent-Type: image/jpeg\r\n\r\n').encode()
+            thumb_part += self.thumb_bytes + b'\r\n'
+        self.thumb_part = thumb_part
+        self.total = len(pre) + self.file_size + len(self.post) + len(thumb_part)
 
     def body_iter(self, progress=None):
         yield self.pre
@@ -210,15 +238,19 @@ class StreamingMultipart:
                 yield b
                 if progress:
                     progress.update(len(b))
+        if self.thumb_part:
+            yield self.thumb_part
+            if progress:
+                progress.update(len(self.thumb_part))
         yield self.post
         if progress:
             progress.update(len(self.post))
 
 
-def post_video(api_base, token, fields, file_path, progress, timeout=3600):
+def post_video(api_base, token, fields, file_path, progress, timeout=3600, thumb_path=None):
     u = urllib.parse.urlparse(api_base)
     mp = StreamingMultipart(fields, 'video', file_path,
-                            os.path.basename(file_path))
+                            os.path.basename(file_path), thumb_path)
     progress.total = mp.total
     conn = http.client.HTTPConnection(u.hostname, u.port or 80, timeout=timeout)
     conn.putrequest('POST', f'/bot{token}/sendVideo')
@@ -251,6 +283,8 @@ def main():
     ap.add_argument('--chat-id', required=True)
     ap.add_argument('--caption', default='')
     ap.add_argument('--out', default='./tg-results')
+    ap.add_argument('--thumb', default=None,
+                    help='صورة غلاف (تُضغط <200KB وتُرفق كـ thumbnail)')
     ap.add_argument('--part-max', type=int, default=PART_MAX)
     a = ap.parse_args()
     if not a.token:
@@ -266,13 +300,15 @@ def main():
     print(f'PARTS count={len(parts)} method=sendVideo (limit {a.part_max} bytes each)',
           flush=True)
     results, t_all0 = [], time.time()
+    thumb_small = make_thumb(a.thumb, a.out) if a.thumb else None
+    print(f'THUMB={thumb_small or "none"}', flush=True)
     for path, size, idx, total in parts:
         meta = probe(path)
         cap = (f"{a.caption}\nPART {idx}/{total} ({size/1024/1024:.0f} MB)"
                if total > 1 else a.caption)
         print(f'Uploading VIDEO PART {idx}/{total}...', flush=True)
 
-        def send_with_title():
+        def send_with_title(thumb=None):
             progress = Progress(f'Uploading VIDEO PART {idx}/{total}...', 1)
             fields = {'chat_id': a.chat_id, 'caption': cap[:1024],
                       'supports_streaming': 'true'}
@@ -283,7 +319,7 @@ def main():
                 fields['height'] = str(meta['height'])
             for attempt in range(1, RETRY_429_MAX + 1):
                 res, dt, sent = post_video(a.api_base, a.token, fields,
-                                           path, progress)
+                                           path, progress, thumb_path=thumb)
                 if res.get('ok'):
                     vid = res['result'].get('video', {})
                     return {'ok': True, 'method': 'sendVideo',
@@ -310,7 +346,7 @@ def main():
                 return {'ok': False, 'error': desc[:300], 'seconds': round(dt, 1)}
             return {'ok': False, 'error': 'retries exhausted on 429'}
 
-        r = send_with_title()
+        r = send_with_title(thumb_small)
         r.update({'part': idx, 'of': total, 'bytes': size,
                   'name': os.path.basename(path),
                   'width': meta['width'], 'height': meta['height'],

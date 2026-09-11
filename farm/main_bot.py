@@ -32,6 +32,7 @@ MSG_LINK = int(os.environ.get('MSG_LINK_ID', '13'))
 MSG_DUMP = int(os.environ.get('MSG_DUMP_ID', '12'))
 MAX_RUNTIME = int(os.environ.get('MAX_RUNTIME_S', '17400'))
 MAX_ACTIVE = 4
+START_T = time.time()
 API = f'https://api.telegram.org/bot{TOKEN}'
 shutdown = {'flag': False}
 
@@ -86,17 +87,27 @@ def pageid_of(url):
     return m.group(1) if m else 'x'
 
 
-def extract_info(page_url):
-    """يشغّل المستخرج ويعيد dict {name, poster, thumbnail, link}."""
+def extract_info(page_url, attempts=3, wait_s=12):
+    """يشغّل المستخرج ويعيد dict {name, poster, thumbnail, link} (سريع تفاعلياً)."""
+    import time as _t
     repo = os.environ.get('REPO_DIR', os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
-    p = subprocess.run(['node', os.path.join(repo, 'exFaselHD1234.js'), page_url],
-                       capture_output=True, text=True, timeout=180)
-    info = {}
-    for line in (p.stdout or '').split('\n'):
-        if line.startswith(('Name:', 'Poster:', 'Thumbnail:', 'Link:', 'Episode:')):
-            k, _, v = line.partition(':')
-            info[k.strip().lower()] = v.strip()
-    return info
+    last = {}
+    for _ in range(attempts):
+        try:
+            p = subprocess.run(['node', os.path.join(repo, 'exFaselHD1234.js'), page_url],
+                               capture_output=True, text=True, timeout=120)
+            info = {}
+            for line in (p.stdout or '').split('\n'):
+                if line.startswith(('Name:', 'Poster:', 'Thumbnail:', 'Link:', 'Episode:')):
+                    k, _, v = line.partition(':')
+                    info[k.strip().lower()] = v.strip()
+            if info.get('link', '').startswith('http'):
+                return info
+            last = info
+        except Exception:
+            pass
+        _t.sleep(wait_s)
+    return last
 
 
 def quality_keyboard(task_id, pageid, r, lang):
@@ -130,6 +141,23 @@ class Handler(BaseHTTPRequestHandler):
             return self._json({'ok': True})
         if self.path == '/status':
             return self._json({'shutdown': shutdown['flag']})
+        if self.path == '/diag':
+            r = self.rdb
+            try:
+                qn = r.llen('queue')
+                aids = r.smembers('active')
+                acts = []
+                for tid in aids:
+                    raw = r.get(f'task:{tid}')
+                    if raw:
+                        t = json.loads(raw)
+                        acts.append({'id': tid, 'status': t.get('status'),
+                                     'worker': t.get('worker'), 'progress': t.get('progress')})
+                hbs = {w: r.get(f'hb:{w}') for w in ('w1', 'w2', 'w3', 'w4')}
+                return self._json({'queue': qn, 'active': acts, 'heartbeats': hbs,
+                                   'uptime_s': int(time.time() - START_T)})
+            except Exception as e:
+                return self._json({'ok': False, 'error': str(e)[:200]}, 500)
         return self._json({'ok': False}, 404)
 
     def do_POST(self):
@@ -160,6 +188,27 @@ class Handler(BaseHTTPRequestHandler):
                 t['progress'] = {k: req.get(k) for k in ('phase', 'pct', 'eta', 'speed')}
                 r.set(f'task:{tid}', json.dumps(t))
                 edit_progress(t)
+                return self._json({'ok': True})
+            if self.path == '/heartbeat':
+                r.set(f"hb:{req.get('worker', '?')}", time.strftime('%H:%M:%S', time.gmtime()))
+                return self._json({'ok': True})
+            if self.path == '/fail':
+                tid = req.get('task')
+                raw = r.get(f'task:{tid}')
+                if not raw:
+                    return self._json({'ok': False}, 404)
+                t = json.loads(raw)
+                t['status'] = 'queued'
+                t.pop('worker', None)
+                r.set(f"task:{tid}", json.dumps(t))
+                r.srem('active', tid)
+                r.srem('claimed_ids', tid)
+                r.rpush('queue', json.dumps(t))
+                try:
+                    tg('editMessageText', {'chat_id': t['user'], 'message_id': t['msg'],
+                                           'text': f"{t.get('name', '')}\n⚠️ worker failed ({str(req.get('error', ''))[:80]}) — requeued"})
+                except Exception:
+                    pass
                 return self._json({'ok': True})
             if self.path == '/done':
                 tid = req.get('task')
@@ -336,15 +385,28 @@ def handle_update(r, up):
             return
         if 'fasel-hd.co' in txt and ('?p=' in txt or '/episodes/' in txt or '/movies/' in txt):
             lang = lang_of(r, uid)
+            stop_typing = {'flag': False}
+
+            def typing_loop():
+                while not stop_typing['flag']:
+                    try:
+                        tg('sendChatAction', {'chat_id': uid, 'action': 'upload_photo'}, timeout=15)
+                    except Exception:
+                        pass
+                    for _ in range(8):
+                        if stop_typing['flag']:
+                            break
+                        time.sleep(0.5)
+
+            th = threading.Thread(target=typing_loop, daemon=True)
+            th.start()
             try:
-                wait = tg('sendMessage', {'chat_id': uid, 'text': STR['st_analysis'][lang]})
-                mid = wait['result']['message_id']
-            except Exception:
-                return
-            info = extract_info(txt.split()[0])
+                info = extract_info(txt.split()[0])
+            finally:
+                stop_typing['flag'] = True
             if not info.get('link'):
                 try:
-                    tg('editMessageText', {'chat_id': uid, 'message_id': mid, 'text': 'Link: ERROR'})
+                    tg('sendMessage', {'chat_id': uid, 'text': 'Link: ERROR — try again later'})
                 except Exception:
                     pass
                 return
@@ -356,14 +418,26 @@ def handle_update(r, up):
             r.set(f'task:{tid}', json.dumps(t))
             cap = t['name']
             kb = quality_keyboard(tid, t['pageid'], r, lang)
+            # رسالة واحدة فقط (صورة) — لا حذف ولا رسائل جديدة بعدها، كل تحديث تعديل
             try:
                 if t.get('poster'):
-                    tg('deleteMessage', {'chat_id': uid, 'message_id': mid})
                     tg('sendPhoto', {'chat_id': uid, 'photo': t['poster'], 'caption': cap,
                                      'reply_markup': json.dumps(kb)})
                 else:
-                    tg('editMessageText', {'chat_id': uid, 'message_id': mid, 'text': cap,
-                                           'reply_markup': json.dumps(kb)})
+                    tg('sendMessage', {'chat_id': uid, 'text': cap,
+                                       'reply_markup': json.dumps(kb)})
+            except Exception:
+                pass
+            return
+        if txt in ('/diag', '/status'):
+            try:
+                qn = r.llen('queue')
+                active = r.smembers('active')
+                hbs = []
+                for w in ('w1', 'w2', 'w3', 'w4'):
+                    hbs.append(f"{w}: {r.get(f'hb:{w}') or '—'}")
+                tg('sendMessage', {'chat_id': uid,
+                                   'text': f"queue={qn} active={len(active)}\n" + '\n'.join(hbs)})
             except Exception:
                 pass
             return

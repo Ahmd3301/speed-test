@@ -109,7 +109,6 @@ def run_task(t):
     workdir = f'/tmp/farm_{tid}'
     os.makedirs(workdir, exist_ok=True)
     os.chdir(workdir)
-    post_progress(tid, 'dl', 0)
     info = extract_master(t['url'])
     stream = pick_quality(info.get('link') or t.get('link'), t.get('quality', '1080p'))
     logf = open('nm.log', 'w')
@@ -135,12 +134,22 @@ def run_task(t):
     import glob
     f = sorted(glob.glob('./dl/*'), key=os.path.getsize)[-1]
     post_progress(tid, 'conv')
+    # Thumbnail المستخرجة من الموقع كغلاف للفيديو
+    thumb_arg = []
+    if t.get('thumb'):
+        try:
+            req = urllib.request.Request(t['thumb'], headers={'User-Agent': UA, 'Referer': 'https://www.fasel-hd.co/'})
+            with urllib.request.urlopen(req, timeout=60) as r:
+                open('thumb.jpg', 'wb').write(r.read())
+            thumb_arg = ['--thumb', 'thumb.jpg']
+        except Exception as e:
+            print(f'thumb skip: {str(e)[:100]}', flush=True)
     # الرفع عبر سكربت المشروع وبوت العامل وسيرفره المحلي
     up = subprocess.Popen(
         [sys.executable, os.path.join(REPO, 'scripts', 'tg_upload.py'),
          '--file', f, '--api-base', 'http://127.0.0.1:8081',
          '--chat-id', CHANNEL, '--caption', f"{t.get('name', '')} {t.get('quality', '')}",
-         '--out', './tg'], stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+         '--out', './tg'] + thumb_arg, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
         text=True, env={**os.environ, 'TG_TOKEN': WTOKEN})
     last_post = 0
     last_pct = 0
@@ -169,6 +178,17 @@ def run_task(t):
 def main():
     API['base'] = discover_api()
     print(f'WORKER {NAME} api={API["base"]}', flush=True)
+
+    def heartbeat():
+        while True:
+            try:
+                api('/heartbeat', {'worker': NAME})
+            except Exception:
+                pass
+            time.sleep(60)
+
+    import threading
+    threading.Thread(target=heartbeat, daemon=True).start()
     while True:
         try:
             st = api('/status', get=True)
@@ -190,7 +210,12 @@ def main():
         try:
             run_task(t)
         except Exception as e:
-            print(f'task {t.get("id")} failed: {str(e)[:200]}', flush=True)
+            err = str(e)[:200]
+            print(f'task {t.get("id")} failed: {err}', flush=True)
+            try:
+                api('/fail', {'task': t.get('id'), 'error': err})
+            except Exception:
+                pass
             time.sleep(5)
 
 

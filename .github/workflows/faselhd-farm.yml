@@ -8,6 +8,17 @@ name: FaselHD Farm (main + 4 workers)
 
 on:
   workflow_dispatch:
+    inputs:
+      runtime_minutes:
+        description: 'Main bot runtime in minutes (debug: use 25)'
+        required: false
+        default: '290'
+        type: string
+      auto_cycle:
+        description: 'Self-retrigger next cycle at end'
+        required: false
+        default: true
+        type: boolean
 
 permissions:
   contents: read
@@ -80,12 +91,13 @@ jobs:
           path: api-url.txt
           retention-days: 1
 
-      - name: Run main bot (up to 290 min)
+      - name: Run main bot
         timeout-minutes: 295
         run: |
+          SECS=$((${{ inputs.runtime_minutes }} * 60))
           REPO_DIR="$PWD" API_PUBLIC_URL="$(cat api-url.txt)" MAIN_TOKEN="${{ secrets.TELEGRAM_BOT_TOKEN }}" \
-          CHANNEL_ID="${{ env.CHANNEL_ID }}" PORT=8000 MAX_RUNTIME_S=17400 \
-          timeout 17400s python3 farm/main_bot.py | tee main-bot.log
+          CHANNEL_ID="${{ env.CHANNEL_ID }}" PORT=8000 MAX_RUNTIME_S=$SECS \
+          timeout ${SECS}s python3 farm/main_bot.py | tee main-bot.log
         env:
           MAIN_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
 
@@ -187,6 +199,7 @@ jobs:
         timeout-minutes: 295
         run: |
           export PATH="$HOME/tools:$PATH"
+          SECS=$((${{ inputs.runtime_minutes }} * 60))
           REPO_DIR="$PWD" WORKER_NAME=w1 WORKER_TOKEN="${{ secrets.TG_W1_TOKEN }}" \
           CHANNEL_ID="${{ env.CHANNEL_ID }}" \
           timeout 17400s python3 farm/worker.py | tee worker-w1.log
@@ -253,6 +266,7 @@ jobs:
         timeout-minutes: 295
         run: |
           export PATH="$HOME/tools:$PATH"
+          SECS=$((${{ inputs.runtime_minutes }} * 60))
           REPO_DIR="$PWD" WORKER_NAME=w2 WORKER_TOKEN="${{ secrets.TG_W2_TOKEN }}" \
           CHANNEL_ID="${{ env.CHANNEL_ID }}" \
           timeout 17400s python3 farm/worker.py | tee worker-w2.log
@@ -319,6 +333,7 @@ jobs:
         timeout-minutes: 295
         run: |
           export PATH="$HOME/tools:$PATH"
+          SECS=$((${{ inputs.runtime_minutes }} * 60))
           REPO_DIR="$PWD" WORKER_NAME=w3 WORKER_TOKEN="${{ secrets.TG_W3_TOKEN }}" \
           CHANNEL_ID="${{ env.CHANNEL_ID }}" \
           timeout 17400s python3 farm/worker.py | tee worker-w3.log
@@ -385,6 +400,7 @@ jobs:
         timeout-minutes: 295
         run: |
           export PATH="$HOME/tools:$PATH"
+          SECS=$((${{ inputs.runtime_minutes }} * 60))
           REPO_DIR="$PWD" WORKER_NAME=w4 WORKER_TOKEN="${{ secrets.TG_W4_TOKEN }}" \
           CHANNEL_ID="${{ env.CHANNEL_ID }}" \
           timeout 17400s python3 farm/worker.py | tee worker-w4.log
@@ -400,9 +416,9 @@ jobs:
     name: Next cycle (self-retrigger)
     runs-on: ubuntu-latest
     needs: [main, w1, w2, w3, w4]
-    if: always()
+    if: always() && inputs.auto_cycle == true
     steps:
-      - name: Trigger next 5h cycle
+      - name: Trigger next cycle
         run: gh workflow run faselhd-farm.yml --ref main -R ${{ github.repository }}
         env:
           GH_TOKEN: ${{ github.token }}
