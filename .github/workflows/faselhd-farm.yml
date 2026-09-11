@@ -24,6 +24,11 @@ permissions:
   contents: read
   actions: write
 
+# منع دورتين متوازيتين أبداً (مثيل واحد للبوت الرئيسي)
+concurrency:
+  group: faselhd-farm-singleton
+  cancel-in-progress: false
+
 env:
   CHANNEL_ID: '-1003864899881'
 
@@ -416,7 +421,12 @@ jobs:
     name: Next cycle (self-retrigger)
     runs-on: ubuntu-latest
     needs: [main, w1, w2, w3, w4]
-    if: always() && inputs.auto_cycle == true
+    # لا توليد عند الإلغاء اليدوي (وإلا أصبح الإلغاء مستحيلاً)، ولا عند تعطيل auto_cycle
+    if: >-
+      always() && inputs.auto_cycle == true &&
+      needs.main.result != 'cancelled' && needs.w1.result != 'cancelled' &&
+      needs.w2.result != 'cancelled' && needs.w3.result != 'cancelled' &&
+      needs.w4.result != 'cancelled'
     steps:
       - name: Trigger next cycle
         run: gh workflow run faselhd-farm.yml --ref main -R ${{ github.repository }}
