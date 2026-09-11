@@ -124,50 +124,12 @@ jobs:
           START_UTC=$(date -u +%FT%TZ); T0=$(date +%s.%N)
           echo "DOWNLOAD_START_UTC=$START_UTC"
           echo "dl_start_utc=$START_UTC" >> "$GITHUB_OUTPUT"
-          mkdir -p dl
-          # تقدير الحجم الكلي: متوسط Content-Length لعينة 5 مقاطع × عدد المقاطع
-          # (يدعم رابط Master أو بلايلست media مباشرة)
-          EXPECTED=$(MASTER_URL="$MASTER" UA="$UA" python3 - <<'PY' 2>/dev/null || echo 0
-          import os, re, urllib.parse, urllib.request
-          def get(url, head=False):
-              q = urllib.request.Request(url, headers={'User-Agent': os.environ['UA']}, method='HEAD' if head else 'GET')
-              with urllib.request.urlopen(q, timeout=30) as r:
-                  return (r.headers if head else r.read().decode('utf8', 'replace')), (r.headers if not head else None)
-          try:
-              link, _ = get(os.environ['MASTER_URL'])
-              if '#EXT-X-STREAM-INF' in link:
-                  base = os.environ['MASTER_URL']
-                  vs = []
-                  for m in re.finditer(r'#EXT-X-STREAM-INF:([^\n]+)\n([^\n]+)', link):
-                      a, u = m.group(1), m.group(2).strip()
-                      bw = int(re.search(r'BANDWIDTH=(\d+)', a).group(1))
-                      r = re.search(r'RESOLUTION=(\d+x\d+)', a).group(1)
-                      vs.append((bw, r, urllib.parse.urljoin(base, u)))
-                  vs.sort(reverse=True)
-                  purl = next((v for v in vs if v[1] == '1920x1080'), vs[0])[2]
-              else:
-                  purl = os.environ['MASTER_URL']
-              pl, _ = get(purl)
-              segs = [ln.strip() for ln in pl.split('\n') if ln.strip() and not ln.strip().startswith('#')]
-              segs = [urllib.parse.urljoin(purl, s) for s in segs]
-              sizes = []
-              for s in segs[:5]:
-                  try:
-                      h, _ = get(s, head=True)
-                      cl = int(h.get('Content-Length') or 0)
-                      if cl > 0: sizes.append(cl)
-                  except Exception:
-                      pass
-              print(int(sum(sizes) / len(sizes) * len(segs)) if sizes else 0)
-          except Exception:
-              print(0)
-          PY
-          )
-          echo "EXPECTED_BYTES=$EXPECTED"
-          if [ "${EXPECTED:-0}" -gt 0 ]; then
-            python3 scripts/dl_progress.py --expected-bytes "$EXPECTED" & echo $! > /tmp/dlprog.pid
-          fi
+          mkdir -p dl dl-tmp
+          # شريط تقدم حقيقي: نسبة الأداة نفسها من لوجها + بايتات tmp-dir الحقيقية
+          python3 scripts/nm3u8_progress.py --log nm3u8dlre.log --tmpdir ./dl-tmp \
+            --out ./dl-progress.json & echo $! > /tmp/nmprog.pid
           N_m3u8DL-RE "$MASTER" --auto-select --thread-count "${{ inputs.threads }}" -mt \
+            --tmp-dir ./dl-tmp \
             --save-dir ./dl --save-name fasel_1080p \
             -H "User-Agent: $UA" -H "Referer: https://www.fasel-hd.co/" \
             --no-log --log-level INFO | tee nm3u8dlre.log
@@ -182,7 +144,7 @@ jobs:
           echo "dl_dt=$DT" >> "$GITHUB_OUTPUT"
           echo "dl_size=$SZ" >> "$GITHUB_OUTPUT"
           ffprobe -v error -show_entries stream=codec_name,width,height -of default=noprint_wrappers=1 "$F" | head -8
-          if [ -f /tmp/dlprog.pid ]; then kill -TERM $(cat /tmp/dlprog.pid) 2>/dev/null || true; sleep 3; fi
+          if [ -f /tmp/nmprog.pid ]; then kill -TERM $(cat /tmp/nmprog.pid) 2>/dev/null || true; sleep 3; fi
           kill $(cat /tmp/mon.pid) 2>/dev/null || true; sleep 2
           python3 scripts/monitor.py --summarize /tmp/mon_dl.csv --label DL | tee mon_dl_report.txt
 
@@ -257,7 +219,7 @@ jobs:
         if: always()
         run: |
           docker stop tgbotapi 2>/dev/null || true; docker rm tgbotapi 2>/dev/null || true
-          rm -rf ./dl
+          rm -rf ./dl ./dl-tmp
           echo "Video + server removed. Remaining:"; ls -la
 
       - name: Upload md + logs artifact (no video)
@@ -271,5 +233,6 @@ jobs:
             nm3u8dlre.log
             tg-upload.log
             mon_dl_report.txt
+            dl-progress.json
           if-no-files-found: warn
           retention-days: 7

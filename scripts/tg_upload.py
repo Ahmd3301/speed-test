@@ -240,6 +240,10 @@ def post_video(api_base, token, fields, file_path, progress, timeout=3600):
 
 
 def main():
+    try:
+        sys.stdout.reconfigure(encoding='utf-8', errors='replace')
+    except Exception:
+        pass
     ap = argparse.ArgumentParser()
     ap.add_argument('--file', required=True)
     ap.add_argument('--api-base', default='http://127.0.0.1:8081')

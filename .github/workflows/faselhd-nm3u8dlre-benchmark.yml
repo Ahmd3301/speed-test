@@ -131,14 +131,17 @@ jobs:
       - name: Download full 1080p with N_m3u8DL-RE (timed)
         id: dl
         run: |
-          mkdir -p dl
+          mkdir -p dl dl-tmp
           START_EPOCH=$(date +%s); START_UTC=$(date -u +%FT%TZ)
           echo "DOWNLOAD_START_UTC=$START_UTC"
           T0=$(date +%s.%N)
+          python3 scripts/nm3u8_progress.py --log nm3u8dlre.log --tmpdir ./dl-tmp \
+            --out ./dl-progress.json & echo $! > /tmp/nmprog.pid
           N_m3u8DL-RE "${{ steps.prep.outputs.master_url }}" \
             --auto-select \
             --thread-count "${{ inputs.threads }}" \
             -mt \
+            --tmp-dir ./dl-tmp \
             --save-dir ./dl --save-name fasel_1080p \
             -H "User-Agent: $UA" -H "Referer: https://www.fasel-hd.co/" \
             --no-log --log-level INFO | tee nm3u8dlre.log
@@ -165,9 +168,11 @@ jobs:
       - name: Stop monitor + resource report
         if: always()
         run: |
+          if [ -f /tmp/nmprog.pid ]; then kill -TERM $(cat /tmp/nmprog.pid) 2>/dev/null || true; sleep 3; fi
           kill $(cat /tmp/mon.pid) 2>/dev/null || true
           sleep 2
           python3 scripts/monitor.py --summarize /tmp/mon.csv --label DL | tee mon_report.txt
+          rm -rf ./dl ./dl-tmp
 
       - name: Summary
         if: always()
@@ -189,7 +194,7 @@ jobs:
       - name: Delete video (no-store policy)
         if: always()
         run: |
-          rm -rf ./dl
+          rm -rf ./dl ./dl-tmp
           echo "Video deleted. Remaining:"; ls -la
 
       - name: Upload logs artifact (no video)
@@ -203,5 +208,6 @@ jobs:
             p1080.m3u8
             nm3u8dlre.log
             mon_report.txt
+            dl-progress.json
           if-no-files-found: warn
           retention-days: 7
