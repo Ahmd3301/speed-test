@@ -273,3 +273,9 @@ Action جديد: `.github/workflows/faselhd-telegram-upload.yml` + سكربت `s
 **الإصلاح:** شرط `cycle` يستثني أي `cancelled` + `concurrency.group: faselhd-farm-singleton` (مثيل واحد إجبارياً — الجديد ينتظر بدل التوازي). كُسرت الحلقة يدوياً وتُحقق من الصمت التام (لا in_progress).
 **وثائق تليجرام (كما طلبت):** `editMessageMedia` مخصص لرسائل media (animation/audio/document/photo/video) — لا يحوّل رسالة نصية إلى صورة، لذا التصميم الصحيح: إرسال الصورة مباشرة من البداية ثم `editMessageText`/`editMessageMedia` (photo→photo) لكل المراحل — وهو المطبق (لا حذف إطلاقاً).
 **الـ thumbnail مثبت محلياً:** ضغط 34KB←7.5KB (<200KB)، وتجمّع multipart يطابق `Content-Length` بايتاً ببايت، وحقل `thumbnail` حاضر — يبقى إثبات القبول من سيرفر تليجرام على أول مهمة حقيقية. لوجات الدورات الملغاة أكدت: Main يُقلع وMSG13 تُحدَّث، والعمال الأربعة يكتشفون API ويعملون بلا أخطاء.
+
+
+## 21) إصلاح تجميد البوت + أول مهمة حقيقية كاملة بالـ thumbnail
+
+**تشخيص "البوت توقف":** حلقة `getUpdates` كانت أحادية الخيط — استخراج واحد (حتى ~دقيقة مع retries) يجمّد معالجة كل التحديثات اللاحقة (النقرات). **الإصلاح:** معالجة متوازية (ThreadPoolExecutor×8) لكل تحديث + مؤشر typing أثناء الاستخراج + مسار `/fail` يعيد المهام المتعثرة + أحداث حية (`events` في Redis تظهر في `/diag` HTTP وأمر `/diag`).
+**إثبات حي (دورة `34609281371`):** أول مهمة حقيقية من المستخدم مكتملة: `link 271259 thumb=Y` ← `queued 360p` ← `claim by w2` ← `done msgs=[22] thumb=./tg/thumb_small.jpg` — أي أن **الفيديو رُفع مع thumbnail الموقع** (message 22). المراحل ظهرت عبر تعديل نفس الرسالة.
