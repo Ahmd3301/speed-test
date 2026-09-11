@@ -72,6 +72,20 @@ def tg_file(method, params, file_path, field='document', timeout=3600):
         return json.loads(r.read().decode())
 
 
+def event(r, text):
+    """سجل أحداث حي (آخر 50) — يظهر في /diag."""
+    try:
+        r.rpush('events', time.strftime('%H:%M:%S', time.gmtime()) + ' ' + text[:160])
+        # قص بسيط عند التجاوز
+        q = r.cmd('LRANGE', 'events', '0', '-1') or []
+        if len(q) > 50:
+            r.delete('events')
+            for x in q[-50:]:
+                r.rpush('events', x)
+    except Exception:
+        pass
+
+
 def bar(pct):
     f = min(10, max(0, int(pct // 10)))
     return '■' * f + '□' * (10 - f)
@@ -154,7 +168,9 @@ class Handler(BaseHTTPRequestHandler):
                         acts.append({'id': tid, 'status': t.get('status'),
                                      'worker': t.get('worker'), 'progress': t.get('progress')})
                 hbs = {w: r.get(f'hb:{w}') for w in ('w1', 'w2', 'w3', 'w4')}
+                evts = r.cmd('LRANGE', 'events', '0', '-1') or []
                 return self._json({'queue': qn, 'active': acts, 'heartbeats': hbs,
+                                   'events': evts[-15:],
                                    'uptime_s': int(time.time() - START_T)})
             except Exception as e:
                 return self._json({'ok': False, 'error': str(e)[:200]}, 500)
@@ -178,6 +194,7 @@ class Handler(BaseHTTPRequestHandler):
                 r.set(f"task:{t['id']}", json.dumps(t))
                 r.sadd('active', t['id'])
                 r.sadd('claimed_ids', t['id'])
+                event(r, f"claim {t['id']} {t.get('quality')} by {t['worker']}")
                 return self._json({'task': t})
             if self.path == '/progress':
                 tid = req.get('task')
@@ -217,10 +234,11 @@ class Handler(BaseHTTPRequestHandler):
                     return self._json({'ok': False}, 404)
                 t = json.loads(raw)
                 t['status'] = 'done'
-                t['result'] = {k: req.get(k) for k in ('msgs', 'sizes', 'parts', 'quality')}
+                t['result'] = {k: req.get(k) for k in ('msgs', 'sizes', 'parts', 'quality', 'thumb')}
                 r.set(f"task:{tid}", json.dumps(t))
                 r.srem('active', tid)
                 r.srem('claimed_ids', tid)
+                event(r, f"done {tid} msgs={req.get('msgs')} thumb={req.get('thumb')}")
                 finalize_task(t)
                 return self._json({'ok': True})
         except Exception as e:
@@ -337,6 +355,7 @@ def handle_update(r, up):
             hit = r.get(f"done:{t['pageid']}:{q}")
             if hit:
                 d = json.loads(hit)
+                event(r, f"instant {tid} {q} (cached)")
                 for mid in d.get('msgs', []):
                     try:
                         tg('forwardMessage', {'chat_id': uid, 'from_chat_id': CHANNEL, 'message_id': mid})
@@ -355,6 +374,7 @@ def handle_update(r, up):
             t['lang'] = lang
             r.set(f"task:{tid}", json.dumps(t))
             r.rpush('queue', json.dumps(t))
+            event(r, f"queued {tid} {q}")
             try:
                 tg('editMessageText', {'chat_id': uid, 'message_id': cq['message']['message_id'],
                                        'text': STR['st_analysis'][lang]})
@@ -416,6 +436,7 @@ def handle_update(r, up):
                  'thumb': info.get('thumbnail'), 'link': info.get('link'),
                  'status': 'new', 'lang': lang}
             r.set(f'task:{tid}', json.dumps(t))
+            event(r, f"link {t['pageid']} {t['name'][:40]} thumb={'Y' if t['thumb'] else 'N'}")
             cap = t['name']
             kb = quality_keyboard(tid, t['pageid'], r, lang)
             # رسالة واحدة فقط (صورة) — لا حذف ولا رسائل جديدة بعدها، كل تحديث تعديل
@@ -436,21 +457,35 @@ def handle_update(r, up):
                 hbs = []
                 for w in ('w1', 'w2', 'w3', 'w4'):
                     hbs.append(f"{w}: {r.get(f'hb:{w}') or '—'}")
+                evts = r.cmd('LRANGE', 'events', '0', '-1') or []
                 tg('sendMessage', {'chat_id': uid,
-                                   'text': f"queue={qn} active={len(active)}\n" + '\n'.join(hbs)})
+                                   'text': f"queue={qn} active={len(active)}\n" + '\n'.join(hbs) +
+                                           '\nevents:\n' + '\n'.join(evts[-8:])})
             except Exception:
                 pass
             return
 
 
 def poll_loop(r):
+    import concurrent.futures as cf
+    pool = cf.ThreadPoolExecutor(max_workers=8)
+
+    def safe(up):
+        try:
+            handle_update(r, up)
+        except Exception as e:
+            try:
+                event(r, f'update_err {str(e)[:100]}')
+            except Exception:
+                pass
+
     offset = 0
     while not shutdown['flag']:
         try:
-            res = tg('getUpdates', {'offset': offset, 'timeout': 50}, timeout=70)
+            res = tg('getUpdates', {'offset': offset, 'timeout': 30}, timeout=60)
             for up in res.get('result', []):
                 offset = up['update_id'] + 1
-                handle_update(r, up)
+                pool.submit(safe, up)
         except Exception:
             time.sleep(3)
 

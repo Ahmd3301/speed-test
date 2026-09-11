@@ -153,10 +153,13 @@ def run_task(t):
         text=True, env={**os.environ, 'TG_TOKEN': WTOKEN})
     last_post = 0
     last_pct = 0
+    thumb_status = 'none'
     while True:
         line = up.stdout.readline()
         if not line and up.poll() is not None:
             break
+        if 'THUMB=' in line:
+            thumb_status = line.split('THUMB=')[1].strip()[:80]
         m = re.search(r'\[([■□]+)\]\s*(\d+)%', line)
         if m and time.time() - last_post > 15:
             last_pct = int(m.group(2))
@@ -171,7 +174,8 @@ def run_task(t):
     # message_ids من channel العامل — الرئيسي يعيد توجيهها للمستخدم
     api('/done', {'task': tid, 'msgs': [x['message_id'] for x in rep['parts']],
                   'sizes': [x['bytes'] for x in rep['parts']],
-                  'parts': len(rep['parts']), 'quality': t.get('quality')})
+                  'parts': len(rep['parts']), 'quality': t.get('quality'),
+                  'thumb': thumb_status})
     os.chdir('/tmp')
 
 
