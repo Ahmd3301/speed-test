@@ -66,6 +66,29 @@ function parseName(html) {
   return 'Unknown';
 }
 
+// NEW: poster من صفحة الحلقة (schema.org itemprop=image) — مثال:
+// https://static.faselhdcdn.com/wp-content/uploads/2023/11/23de45b7....jpg
+function parsePoster(html) {
+  let m = html.match(/<meta[^>]+itemprop=["']image["'][^>]+content=["']([^"']+)["']/i)
+       || html.match(/<meta[^>]+content=["']([^"']+)["'][^>]+itemprop=["']image["']/i);
+  if (m) return m[1];
+  const imgs = [...html.matchAll(/<img[^>]+src=["']([^"']+)["'][^>]*>/gi)].map(x => x[1]);
+  const hit = imgs.find(s => /faselhdcdn\.com\/wp-content\/uploads\//i.test(s)
+    && !/logo|favicon|themes\//i.test(s));
+  return hit || null;
+}
+
+// NEW: thumbnail من صفحة المشغّل (poster وسم <video>) — مثال:
+// https://img.scdns.io/thumb/d721cfdb..../large.jpg
+function parseThumbnail(playerHtml) {
+  if (!playerHtml) return null;
+  let m = playerHtml.match(/<video[^>]+poster=["']([^"']+)["']/i)
+       || playerHtml.match(/<video[^>]+poster='([^']+)'/i);
+  if (m) return m[1];
+  m = playerHtml.match(/https?:\/\/img\.scdns\.io\/thumb\/[^"'<>\s]+/i);
+  return m ? m[0] : null;
+}
+
 // NEW: Extract episode number from Arabic text like "الحلقة 1" or "الحلقة 01"
 function parseEpisodeNumber(html) {
   const m = html.match(/الحلقة\s*(\d+)/i);
@@ -184,14 +207,41 @@ function decodeM3u8(playerHtml, playerUrl) {
   return uniq;
 }
 
-// يجرب كل روابط المشغّل بالترتيب حتى أول رابط m3u8 صالح
-// (الموقع يعرض عدة سيرفرات وقد يكون أولها ميتاً: Token Expired!)
-async function tryPlayers(playerUrls) {
+// يجلب كل صفحات المشغّل الصالحة (يتخطى Token Expired! وأي صفحة ميتة)
+async function fetchWorkingPlayer(playerUrls) {
   for (const pu of playerUrls) {
     try {
       const playerHtml = await fetchUrl(pu);
-      if (!playerHtml || playerHtml.length < 500) continue;
-      const urls = decodeM3u8(playerHtml, pu);
+      if (playerHtml && playerHtml.length >= 500) return { html: playerHtml, url: pu };
+    } catch (e) {}
+  }
+  return null;
+}
+
+// يجلب كل الصفحات الصالحة دفعة واحدة (للـ Thumbnail الذي قد يكون في سيرفر دون غيره)
+async function fetchAllWorkingPlayers(playerUrls) {
+  const out = [];
+  for (const pu of playerUrls) {
+    try {
+      const playerHtml = await fetchUrl(pu);
+      if (playerHtml && playerHtml.length >= 500) out.push({ html: playerHtml, url: pu });
+    } catch (e) {}
+  }
+  return out;
+}
+
+// يجرب كل روابط المشغّل بالترتيب حتى أول رابط m3u8 صالح
+// (الموقع يعرض عدة سيرفرات وقد يكون أولها ميتاً: Token Expired!)
+async function tryPlayers(playerUrls) {
+  const found = await fetchWorkingPlayer(playerUrls);
+  if (!found) return null;
+  // جرّب الصفحة الشغالة أولاً ثم بقية الروابط كاحتياط
+  const ordered = [found, ...playerUrls.filter(u => u !== found.url).map(u => ({ url: u }))];
+  for (const item of ordered) {
+    try {
+      const html = item.html || await fetchUrl(item.url);
+      if (!html || html.length < 500) continue;
+      const urls = decodeM3u8(html, item.url);
       if (urls && urls.length > 0) return urls[0];
     } catch (e) {}
   }
@@ -234,19 +284,35 @@ async function showUrls(label, epUrl) {
     const html = await fetchUrl(url);
     const name = parseName(html);
     const episode = parseEpisodeNumber(html);
+    const poster = parsePoster(html);
     const playerUrls = parsePlayerUrls(html);
 
     if (playerUrls.length === 0) {
       console.log('Name: ' + name);
       if (episode) console.log('Episode: ' + episode);
+      if (poster) console.log('Poster: ' + poster);
       console.log('Link: ERROR (no player found)');
       process.exit(1);
     }
 
-    const m3u8Link = await tryPlayers(playerUrls);
+    const working = await fetchAllWorkingPlayers(playerUrls);
+    let thumbnail = null;
+    for (const w of working) {
+      thumbnail = parseThumbnail(w.html);
+      if (thumbnail) break;
+    }
+    let m3u8Link = null;
+    for (const w of working) {
+      try {
+        const urls = decodeM3u8(w.html, w.url);
+        if (urls && urls.length > 0) { m3u8Link = urls[0]; break; }
+      } catch (e) {}
+    }
 
     console.log('Name: ' + name);
     if (episode) console.log('Episode: ' + episode);
+    if (poster) console.log('Poster: ' + poster);
+    if (thumbnail) console.log('Thumbnail: ' + thumbnail);
 
     if (m3u8Link) {
       console.log('Link: ' + m3u8Link);
