@@ -85,7 +85,7 @@ class Progress:
         self.total = total
         self.sent = 0
         self.t0 = time.time()
-        self.last_print = 0.0
+        self.last_print = self.t0  # أول طباعة بعد PRINT_EVERY_S ثانية من البيانات الفعلية
         self.cpu_prev = read_cpu()
         self.cpu_sum = 0.0
         self.cpu_n = 0
